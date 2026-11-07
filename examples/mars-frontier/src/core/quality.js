@@ -25,7 +25,7 @@ export const TIERS = {
     antialias: true,
     shadows: 1024,
     shadowEvery: 2,
-    terrain: 220,
+    terrain: 200,
     rocks: 1300,
     rockDetail: 1,
     particles: 160,

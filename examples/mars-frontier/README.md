@@ -102,6 +102,13 @@ Notes:
   with stereo cameras and a laser spectrometer, a five-joint arm that deploys at survey sites,
   a tracking high-gain antenna, hazcams, lidar and status LEDs. It has an **Inspect** mode with
   tappable component hotspots, and a first-person **Mastcam** view.
+- **Horizon:** the terrain is two meshes. A dense near grid covers the base (about 2.6 m
+  spacing at the centre). A polar horizon ring to 3.7 km spends its vertices on angular
+  resolution, which is what shapes mountain silhouettes seen from the settlement.
+- **Wheel tracks:** the rover leaves tread-patterned tracks in the regolith. They are a
+  ring-buffered ribbon in one draw call, and older tracks fade out.
+- **Rover audio:** a faint, muffled motor sound follows speed and camera distance. Mars' thin
+  CO₂ air carries sound poorly.
 - **Cinematic mode:** seven composed shots with smootherstep dollies, crossfades, letterbox and
   captions, and the UI hidden.
 - **Graphics settings:** Low / Balanced / High / **Automatic**. Automatic lowers resolution,

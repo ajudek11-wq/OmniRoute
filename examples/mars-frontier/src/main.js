@@ -7,6 +7,7 @@ import { buildSettlement, PANEL_AREA } from "./scene/settlement.js";
 import { Rover, ROVER_PARTS } from "./scene/rover.js";
 import { CameraRig, CAMERA_MODES } from "./scene/cameraRig.js";
 import { Cinematic } from "./scene/cinematic.js";
+import { TrackTrail } from "./scene/tracks.js";
 import { configureSurfaces, loadGroundSets, terrainMaterial, rockMaterial, installAtmosphere } from "./scene/surfaces.js";
 import { SOL_SECONDS } from "./sim/constants.js";
 import { AudioEngine } from "./audio/audio.js";
@@ -132,9 +133,14 @@ class App {
       if (sets.fallback) document.getElementById("loading-note").textContent = "Photographic textures unavailable. Using procedural surfaces.";
 
       await progress(0.24, "Generating Arcadia Planitia terrain");
-      const terrainGeo = buildTerrain(this.quality.terrain);
-      this.terrain = new THREE.Mesh(terrainGeo, terrainMaterial(sets, { low: this.quality.terrainLow }));
-      this.terrain.receiveShadow = true;
+      const ring = { low: [256, 48], balanced: [384, 64], high: [512, 80] }[this.quality.key] ?? [384, 64];
+      const tMat = terrainMaterial(sets, { low: this.quality.terrainLow });
+      this.terrain = new THREE.Group();
+      for (const g of buildTerrain(this.quality.terrain, ring[0], ring[1])) {
+        const m = new THREE.Mesh(g, tMat);
+        m.receiveShadow = true;
+        this.terrain.add(m);
+      }
       scene.add(this.terrain);
 
       await progress(0.44, "Scattering boulders and ejecta");
@@ -149,6 +155,8 @@ class App {
       await progress(0.74, "Deploying exploration rover");
       this.rover = new Rover(this.settlement.materials);
       scene.add(this.rover.root);
+      this.tracks = new TrackTrail(this.quality.key === "low" ? 300 : 700);
+      scene.add(this.tracks.mesh);
 
       await progress(0.84, "Bringing life support online");
       this.initState();
@@ -175,7 +183,12 @@ class App {
       this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus: new THREE.Vector3(), time: 0, dt: 0, frame: 0 });
       this.renderer.shadowMap.needsUpdate = true;
       this.world.refreshEnvironment(0, true);
-      this.renderer.compile(scene, camera);
+      // Compile shaders without freezing the page where the browser supports parallel compile.
+      if (this.renderer.extensions.has("KHR_parallel_shader_compile")) {
+        await this.renderer.compileAsync(scene, camera).catch(() => this.renderer.compile(scene, camera));
+      } else {
+        this.renderer.compile(scene, camera);
+      }
       this.renderer.render(scene, camera);
 
       await progress(1, "Settlement ready");
@@ -525,7 +538,7 @@ class App {
     rc.setFromCamera(ndc, this.world.camera);
     const firstPerson = this.rig.mode === "mastcam";
     const hits = rc.intersectObjects(firstPerson ? this.settlement.pickables : [...this.settlement.pickables, this.rover.hit], false);
-    const terrainHit = rc.intersectObject(this.terrain, false)[0];
+    const terrainHit = rc.intersectObject(this.terrain, true)[0];
     const hit = hits.find((h) => !terrainHit || h.distance < terrainHit.distance + 2);
     if (hit) {
       const pick = hit.object.userData.pick;
@@ -940,6 +953,7 @@ class App {
 
     this.updateSim(dt);
     this.rover.update(dt, t);
+    this.tracks.update(this.rover.pos, this.rover.heading, this.rover.moving);
     this.updateRoverTask(dt);
     if (this.reportCooldown > 0) this.reportCooldown -= dt;
 
@@ -973,7 +987,8 @@ class App {
 
     // Audio proximity
     const camDist = this.world.camera.position.length();
-    this.audio.update(Math.max(0, 1 - camDist / 140), env.storm);
+    const roverNear = Math.max(0, 1 - this.world.camera.position.distanceTo(this.rover.pos) / 60);
+    this.audio.update(Math.max(0, 1 - camDist / 140), env.storm, roverNear * Math.min(1, this.rover.speed / 3), this.rover.speed);
 
     if (this.started) this.updateLabels();
 

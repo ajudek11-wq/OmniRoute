@@ -185,8 +185,6 @@ export function normalAt(x, z, out = new THREE.Vector3()) {
   return out.set(-hx, 2 * e, -hz).normalize();
 }
 
-const warp = (t) => Math.sign(t) * (0.14 * Math.abs(t) + 0.86 * Math.abs(t) ** 3);
-
 // sRGB design colours → linear (THREE.Color converts automatically). Tuned to multiply with
 // the photographic detail maps (average ratio 1.0).
 const C = {
@@ -219,43 +217,11 @@ function windStreak(x, z) {
   return s;
 }
 
-export function buildTerrain(segments) {
-  const N = segments;
-  const R = TERRAIN_RADIUS;
-  const count = (N + 1) * (N + 1);
-  const pos = new Float32Array(count * 3);
-  for (let j = 0; j <= N; j++) {
-    const z = R * warp(-1 + (2 * j) / N);
-    for (let i = 0; i <= N; i++) {
-      const x = R * warp(-1 + (2 * i) / N);
-      const k = j * (N + 1) + i;
-      pos[k * 3] = x;
-      pos[k * 3 + 1] = heightAt(x, z);
-      pos[k * 3 + 2] = z;
-    }
-  }
-  const index = new Uint32Array(N * N * 6);
-  let o = 0;
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      const a = j * (N + 1) + i;
-      const b = a + 1;
-      const c = a + N + 1;
-      const d = c + 1;
-      index[o++] = a;
-      index[o++] = c;
-      index[o++] = b;
-      index[o++] = b;
-      index[o++] = c;
-      index[o++] = d;
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  geo.setIndex(new THREE.BufferAttribute(index, 1));
-  geo.computeVertexNormals();
-
+/** Per-vertex Mars colour + rock-exposure attribute, shared by the near grid and horizon ring. */
+function shadeVertices(geo) {
+  const pos = geo.attributes.position.array;
   const nrm = geo.attributes.normal.array;
+  const count = pos.length / 3;
   const col = new Float32Array(count * 3);
   const surf = new Float32Array(count * 2);
   const c = new THREE.Color();
@@ -271,16 +237,16 @@ export function buildTerrain(segments) {
     c.lerp(C.dark, smoothstep(0.35, 0.9, nD(x * 0.03 + 2, z * 0.03 - 7)) * 0.22);
     c.lerp(C.bright, smoothstep(0.5, 0.95, nA(x * 0.05 - 9, z * 0.05 + 3)) * 0.15);
     c.lerp(C.dark, smoothstep(0.08, 0.32, slope) * 0.6);
-    const cr = craterContribution(x, z);
+    const cr = d < 1500 ? craterContribution(x, z) : { interior: 0, ice: 0, rimRock: 0 };
     c.lerp(C.dark, cr.interior * 0.3);
-    c.lerp(C.bright, windStreak(x, z) * 0.55);
+    if (d < 1500) c.lerp(C.bright, windStreak(x, z) * 0.55);
     const m = smoothstep(800, 1800, d);
     if (m > 0) {
       const band = Math.sin(y * 0.09 + nD(x * 0.003, z * 0.003) * 2) * 0.5 + 0.5;
       c.lerp(C.mountain, m * 0.35).lerp(C.band, m * band * 0.22);
     }
     const md = Math.hypot(x - MESA.x, z - MESA.z);
-    const fw = flatWeight(x, z);
+    const fw = d < 900 ? flatWeight(x, z) : 0;
     c.lerp(C.pad, fw * 0.32);
     c.lerp(C.ice, cr.ice * 0.92);
     col[k * 3] = c.r;
@@ -293,12 +259,95 @@ export function buildTerrain(segments) {
     rock *= 1 - fw * 0.95;
     rock *= 1 - cr.ice;
     surf[k * 2] = rock;
-    surf[k * 2 + 1] = 0;
   }
   geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
   geo.setAttribute("aSurf", new THREE.BufferAttribute(surf, 2));
   geo.computeBoundingSphere();
   return geo;
+}
+
+export const NEAR_EXTENT = 820;
+export const RING_INNER = 760;
+const RING_OUTER = 3700;
+
+/** Dense grid around the settlement (≈2.6 m at the centre), trimmed to a disc. */
+function buildNear(N) {
+  const R = NEAR_EXTENT;
+  const w = (t) => Math.sign(t) * (0.35 * Math.abs(t) + 0.65 * Math.abs(t) ** 3);
+  const pos = new Float32Array((N + 1) * (N + 1) * 3);
+  for (let j = 0; j <= N; j++) {
+    const z = R * w(-1 + (2 * j) / N);
+    for (let i = 0; i <= N; i++) {
+      const x = R * w(-1 + (2 * i) / N);
+      const k = (j * (N + 1) + i) * 3;
+      pos[k] = x;
+      pos[k + 1] = heightAt(x, z);
+      pos[k + 2] = z;
+    }
+  }
+  const idx = [];
+  const inside = (a, b, c) => {
+    const cx = (pos[a * 3] + pos[b * 3] + pos[c * 3]) / 3;
+    const cz = (pos[a * 3 + 2] + pos[b * 3 + 2] + pos[c * 3 + 2]) / 3;
+    return Math.hypot(cx, cz) < RING_INNER + 10;
+  };
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const a = j * (N + 1) + i;
+      const b = a + 1;
+      const c = a + N + 1;
+      const d = c + 1;
+      if (inside(a, c, b)) idx.push(a, c, b);
+      if (inside(b, c, d)) idx.push(b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return shadeVertices(geo);
+}
+
+/**
+ * Polar ring out to the horizon. Angular resolution is what defines mountain silhouettes seen
+ * from the base, so the ring spends its vertices there. Its inner edge tucks slightly under the
+ * near grid to hide the join.
+ */
+function buildRing(A, M) {
+  const pos = new Float32Array(A * (M + 1) * 3);
+  for (let j = 0; j <= M; j++) {
+    const s = j / M;
+    const r = RING_INNER + (RING_OUTER - RING_INNER) * Math.pow(s, 1.7);
+    const tuck = 0.6 * (1 - smoothstep(RING_INNER, RING_INNER + 70, r));
+    for (let i = 0; i < A; i++) {
+      const a = (i / A) * Math.PI * 2;
+      const x = Math.cos(a) * r;
+      const z = Math.sin(a) * r;
+      const k = (j * A + i) * 3;
+      pos[k] = x;
+      pos[k + 1] = heightAt(x, z) - tuck;
+      pos[k + 2] = z;
+    }
+  }
+  const idx = [];
+  for (let j = 0; j < M; j++) {
+    for (let i = 0; i < A; i++) {
+      const a = j * A + i;
+      const b = j * A + ((i + 1) % A);
+      const c = a + A;
+      const d = b + A;
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return shadeVertices(geo);
+}
+
+export function buildTerrain(segments, ringAngular = 384, ringRadial = 64) {
+  return [buildNear(segments), buildRing(ringAngular, ringRadial)];
 }
 
 function rockGeometry(seed, detail, kind) {

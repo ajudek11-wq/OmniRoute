@@ -14,6 +14,7 @@ const ctx = await browser.newContext(device);
 await ctx.addInitScript(() => {
   localStorage.setItem("mars-frontier:settings:v1", JSON.stringify({ reduceMotion: true, quality: localStorage.getItem("qcq") || "balanced" }));
 });
+ctx.setDefaultTimeout(180000);
 const page = await ctx.newPage();
 const errors = [];
 page.on("console", (m) => ["error", "warning"].includes(m.type()) && errors.push(`[${m.type()}] ${m.text()}`));
@@ -31,7 +32,7 @@ const setTime = (frac) =>
   }, frac);
 const shot = async (name, settle = 2500) => {
   await wait(settle);
-  await page.screenshot({ path: `${out}${name}.png` });
+  await page.screenshot({ path: `${out}${name}.png`, timeout: 180000 });
   console.log("shot", name);
 };
 const mode = (m) => page.evaluate((x) => { window.__frontier.sheet.close(); window.__frontier.setMode(x); }, m);
@@ -59,6 +60,20 @@ await page.evaluate(() => window.__frontier.select("structure", "greenhouse"));
 await shot("11-greenhouse-sheet");
 await page.evaluate(() => { window.__frontier.sheet.close(); window.__frontier.toggleCinematic(true); });
 await shot("12-cinematic", 4000);
+// Wheel tracks: drive the rover programmatically (headless frame rates are too slow to wait for).
+await page.evaluate(() => {
+  const a = window.__frontier;
+  a.toggleCinematic(false);
+  a.rover.driveTo(70, 80, "QC drive");
+  for (let i = 0; i < 260; i++) {
+    a.rover.update(0.1, i * 0.1);
+    a.tracks.update(a.rover.pos, a.rover.heading, a.rover.moving);
+  }
+  a.rover.stop("QC hold");
+});
+await setTime(0.38);
+await mode("rover");
+await shot("13-tracks", 3500);
 const info = await page.evaluate(() => ({ calls: window.__frontier.renderer.info.render.calls, tris: window.__frontier.renderer.info.render.triangles, tex: window.__frontier.renderer.info.memory.textures, geo: window.__frontier.renderer.info.memory.geometries, q: window.__frontier.quality.key }));
 console.log("renderer", JSON.stringify(info));
 const real = errors.filter((e) => !/GPU stall|performance|swiftshader|Automatic fallback|ReadPixels/i.test(e));

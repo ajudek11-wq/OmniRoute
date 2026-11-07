@@ -67,6 +67,22 @@ export class AudioEngine {
     humFilter.type = "lowpass";
     humFilter.frequency.value = 400;
     this.humGain.connect(humFilter).connect(this.master);
+
+    // Rover drive motors: detuned saws through a low-pass whose cutoff and pitch follow speed.
+    this.motorGain = ctx.createGain();
+    this.motorGain.gain.value = 0;
+    this.motorFilter = ctx.createBiquadFilter();
+    this.motorFilter.type = "lowpass";
+    this.motorFilter.frequency.value = 300;
+    this.motorOsc = [70, 70.9].map((f) => {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = f;
+      o.connect(this.motorFilter);
+      o.start();
+      return o;
+    });
+    this.motorFilter.connect(this.motorGain).connect(this.master);
     return true;
   }
 
@@ -86,12 +102,16 @@ export class AudioEngine {
     if (this.enabled && this.ctx) this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.2);
   }
 
-  /** Called every frame: proximity to the habitat, storm intensity. */
-  update(habitatProximity, storm) {
+  /** Called every frame: proximity to the habitat, storm intensity, rover speed × proximity. */
+  update(habitatProximity, storm, rover = 0, roverSpeed = 0) {
     if (!this.enabled || !this.ctx) return;
     const t = this.ctx.currentTime;
     this.humGain.gain.setTargetAtTime(habitatProximity * 0.9, t, 0.5);
     this.windGain.gain.setTargetAtTime(0.35 + storm * 0.9, t, 1.2);
+    // Mars' thin CO₂ atmosphere carries sound poorly: keep the motors faint and muffled.
+    this.motorGain.gain.setTargetAtTime(rover * 0.05, t, 0.3);
+    this.motorFilter.frequency.setTargetAtTime(220 + roverSpeed * 60, t, 0.3);
+    this.motorOsc.forEach((o, i) => o.frequency.setTargetAtTime(55 + roverSpeed * 9 + i * 0.9, t, 0.3));
   }
 
   tone(freq, dur = 0.12, type = "sine", gain = 0.08, delay = 0) {
