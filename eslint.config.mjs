@@ -216,6 +216,8 @@ const eslintConfig = [
       "dist/**",
       "coverage/**",
       "next-env.d.ts",
+      // Standalone Vite/Three.js app with its own toolchain (not part of the OmniRoute build)
+      "examples/mars-frontier/**",
       // Scripts and binaries
       "scripts/**",
       "bin/**",

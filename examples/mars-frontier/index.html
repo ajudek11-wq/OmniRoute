@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#0b0908" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Operate and explore an interactive Mars research settlement." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Frontier" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <title>MARS: FRONTIER</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene" aria-label="3D view of the Mars settlement"></canvas>
+      <div class="vignette" aria-hidden="true"></div>
+      <div id="labels" aria-hidden="false"></div>
+
+      <header class="topbar">
+        <div class="brand" aria-hidden="true">
+          <span class="brand-mark"></span>
+          <div>
+            <div class="brand-name">MARS: FRONTIER</div>
+            <div class="brand-sub">Arcadia Planitia · 40.2°N</div>
+          </div>
+        </div>
+        <div class="clock glass">
+          <button class="clock-btn" id="btn-play" aria-label="Pause time"></button>
+          <div class="clock-read">
+            <span class="clock-sol" id="clock-sol">SOL 1</span>
+            <span class="clock-time" id="clock-time">07:12</span>
+          </div>
+          <button class="clock-speed" id="btn-speed" aria-label="Change time speed">10m/s</button>
+        </div>
+        <div class="top-actions">
+          <button class="icon-btn glass" id="btn-sound" aria-label="Sound off"></button>
+          <button class="icon-btn glass" id="btn-settings" aria-label="Settings"></button>
+        </div>
+      </header>
+
+      <button class="resources glass" id="resources" aria-label="Open settlement systems"></button>
+
+      <div id="toasts" aria-live="polite"></div>
+      <div class="drive-hint glass" id="drive-hint" hidden>Tap the ground to drive</div>
+
+      <nav class="views glass" id="views" aria-label="Camera views"></nav>
+
+      <section class="sheet" id="sheet" aria-hidden="true">
+        <div class="sheet-grip" id="sheet-grip"><span></span></div>
+        <header class="sheet-head">
+          <div>
+            <div class="eyebrow" id="sheet-eyebrow"></div>
+            <h2 id="sheet-title"></h2>
+          </div>
+          <button class="icon-btn ghost" id="sheet-close" aria-label="Close panel"></button>
+        </header>
+        <div class="sheet-body" id="sheet-body"></div>
+      </section>
+
+      <nav class="dock" id="dock" aria-label="Main"></nav>
+
+      <div class="intro-title" id="intro-title" aria-hidden="true">
+        <div class="intro-eyebrow">Frontier Base · Arcadia Planitia</div>
+        <div class="intro-name">MARS<span>:</span> FRONTIER</div>
+        <div class="intro-sub">Sol 1 · Research settlement online</div>
+      </div>
+
+      <div class="loading" id="loading">
+        <div class="loading-planet" aria-hidden="true"></div>
+        <div class="loading-inner">
+          <div class="loading-eyebrow">Frontier Base · Arcadia Planitia</div>
+          <h1 class="loading-title">MARS<span>:</span> FRONTIER</h1>
+          <p class="loading-copy">An interactive research settlement, 225 million km from home.</p>
+          <div class="loading-bar"><span id="loading-fill"></span></div>
+          <div class="loading-stage" id="loading-stage">Initialising</div>
+          <div class="loading-actions" id="loading-actions" hidden>
+            <button class="btn primary" id="btn-enter">Enter settlement</button>
+            <label class="check">
+              <input type="checkbox" id="chk-sound" />
+              <span>Ambient sound</span>
+            </label>
+          </div>
+          <p class="loading-note" id="loading-note"></p>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

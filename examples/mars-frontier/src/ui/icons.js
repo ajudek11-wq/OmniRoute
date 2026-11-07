@@ -1,0 +1,30 @@
+const svg = (body) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+
+export const ICONS = {
+  orbit: svg('<circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="9.5" ry="4" transform="rotate(-20 12 12)"/>'),
+  surface: svg('<path d="M3 18l5-6 4 4 3-3 6 5"/><circle cx="16.5" cy="6.5" r="2"/>'),
+  aerial: svg('<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>'),
+  habitat: svg('<path d="M3 19h18"/><path d="M5 19v-6a7 7 0 0114 0v6"/><path d="M10 19v-3h4v3"/>'),
+  rover: svg('<rect x="5" y="8" width="14" height="5" rx="1"/><circle cx="7" cy="16.5" r="2"/><circle cx="12" cy="16.5" r="2"/><circle cx="17" cy="16.5" r="2"/><path d="M15 8V5h2"/>'),
+  missions: svg('<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>'),
+  systems: svg('<path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/>'),
+  scenario: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  log: svg('<path d="M6 4h9l3 3v13H6z"/><path d="M9 10h6M9 14h6M9 18h4"/>'),
+  settings: svg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H3a2 2 0 110-4h.1a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3H9a1.6 1.6 0 001-1.5V3a2 2 0 114 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8V9a1.6 1.6 0 001.5 1H21a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"/>'),
+  soundOn: svg('<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9a4 4 0 010 6M18.5 6.5a7.5 7.5 0 010 11"/>'),
+  soundOff: svg('<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/>'),
+  play: svg('<path d="M7 5l12 7-12 7z" fill="currentColor" stroke="none"/>'),
+  pause: svg('<rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/>'),
+  close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  target: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
+  check: svg('<path d="M5 12.5l4.5 4.5L19 7"/>'),
+  info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>'),
+  o2: svg('<circle cx="9" cy="12" r="5"/><path d="M16 15.5c0-1 2.5-1.5 2.5-3a1.3 1.3 0 00-2.5-.4M16 18h3"/>'),
+  water: svg('<path d="M12 3s6 6.5 6 11a6 6 0 01-12 0c0-4.5 6-11 6-11z"/>'),
+  food: svg('<path d="M12 21v-8"/><path d="M12 13c-4 0-6-3-6-7 4 0 6 3 6 7zM12 13c4 0 6-3 6-7-4 0-6 3-6 7z"/>'),
+  power: svg('<path d="M13 2L5 14h6l-1 8 8-12h-6z"/>'),
+  battery: svg('<rect x="3" y="7" width="16" height="10" rx="2"/><path d="M22 11v2"/><path d="M6 10v4M9 10v4"/>'),
+  autonomy: svg('<path d="M12 3a9 9 0 109 9"/><path d="M12 7a5 5 0 105 5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/>'),
+  locate: svg('<path d="M12 21s-7-6.2-7-11a7 7 0 0114 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>'),
+};
