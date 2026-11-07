@@ -31,14 +31,14 @@
         </div>
         <div class="clock glass">
           <button class="clock-btn" id="btn-play" aria-label="Pause time"></button>
-          <div class="clock-read">
+          <button class="clock-read" id="clock-open" aria-label="Time and lighting">
             <span class="clock-sol" id="clock-sol">SOL 1</span>
             <span class="clock-time" id="clock-time">07:12</span>
-          </div>
+          </button>
           <button class="clock-speed" id="btn-speed" aria-label="Change time speed">10m/s</button>
         </div>
         <div class="top-actions">
-          <button class="icon-btn glass" id="btn-sound" aria-label="Sound off"></button>
+          <button class="icon-btn glass" id="btn-cine" aria-label="Cinematic mode"></button>
           <button class="icon-btn glass" id="btn-settings" aria-label="Settings"></button>
         </div>
       </header>
@@ -47,6 +47,20 @@
 
       <div id="toasts" aria-live="polite"></div>
       <div class="drive-hint glass" id="drive-hint" hidden>Tap the ground to drive</div>
+
+      <div class="mastcam-hud" id="mastcam-hud" hidden aria-hidden="true">
+        <div class="mc-corner tl"></div><div class="mc-corner tr"></div><div class="mc-corner bl"></div><div class="mc-corner br"></div>
+        <div class="mc-reticle"></div>
+        <div class="mc-tag">MASTCAM-L · 34 mm · <span id="mc-readout">AZ 000° EL 00°</span></div>
+      </div>
+
+      <div class="cine" id="cine" hidden>
+        <div class="cine-bar top"></div>
+        <div class="cine-bar bottom"></div>
+        <div class="cine-cap"><div class="cine-title" id="cine-title"></div><div class="cine-sub" id="cine-sub"></div></div>
+        <div class="cine-exit">Tap to exit</div>
+        <div class="cine-fade" id="cine-fade"></div>
+      </div>
 
       <nav class="views glass" id="views" aria-label="Camera views"></nav>
 
@@ -75,7 +89,7 @@
         <div class="loading-inner">
           <div class="loading-eyebrow">Frontier Base · Arcadia Planitia</div>
           <h1 class="loading-title">MARS<span>:</span> FRONTIER</h1>
-          <p class="loading-copy">An interactive research settlement, 225 million km from home.</p>
+          <p class="loading-copy">An interactive research settlement, on average 225 million km from home.</p>
           <div class="loading-bar"><span id="loading-fill"></span></div>
           <div class="loading-stage" id="loading-stage">Initialising</div>
           <div class="loading-actions" id="loading-actions" hidden>

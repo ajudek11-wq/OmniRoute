@@ -47,7 +47,7 @@ export const PATHS = [
   ],
 ];
 
-export const ROVER_HOME = { x: 36, z: 36, heading: Math.PI };
+export const ROVER_HOME = { x: 36, z: 36, heading: 0.35 };
 export const SOLAR_SERVICE_POINT = { x: 84, z: 6 };
 
 export const SURVEY_SITES = [

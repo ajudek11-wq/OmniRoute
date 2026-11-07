@@ -5,6 +5,8 @@ import { SCENARIOS, CONFIG_LIMITS } from "../sim/scenarios.js";
 import { PARAMS, CATEGORIES } from "../sim/constants.js";
 import { fmtSols, LOAD_LABELS } from "../sim/engine.js";
 import { SURVEY_SITES } from "../data/layout.js";
+import { ROVER_PARTS } from "../scene/rover.js";
+import { clockString, localTime } from "../sim/engine.js";
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -137,9 +139,13 @@ export function roverView(app) {
       <p>A six-wheel rocker-bogie rover with a mast camera, arm-mounted spectrometer and high-gain antenna. In Rover view, tap the ground to drive.</p>
       ${teleTable([["Task"], ["Speed"], ["Heading"], ["Pitch / roll"], ["Odometer"], ["Battery"], ["Position"]], "r")}
       <div class="btn-row">
-        <button class="btn primary" data-action="mode" data-mode="rover"><i>${ICONS.rover}</i>Rover view</button>
+        <button class="btn primary" data-action="mode" data-mode="roverInspect"><i>${ICONS.inspect}</i>Inspect exterior</button>
+        <button class="btn" data-action="mode" data-mode="mastcam"><i>${ICONS.camera}</i>Mastcam view</button>
+        <button class="btn" data-action="mode" data-mode="rover"><i>${ICONS.rover}</i>Follow & drive</button>
         <button class="btn" data-action="rover-home" data-bind="home">Return to garage</button>
-      </div>`,
+      </div>
+      <div class="section-title">Components</div>
+      <div class="parts">${ROVER_PARTS.map((p) => `<button class="part-chip" data-action="part" data-id="${p.id}">${esc(p.name)}</button>`).join("")}</div>`,
     binds: {
       r0: () => r.task,
       r1: () => `${r.speed.toFixed(1)} m/s`,
@@ -152,6 +158,78 @@ export function roverView(app) {
       r5: () => ({ text: pct(r.battery), cls: r.battery < 0.25 ? "caution" : "" }),
       r6: () => `${num(r.pos.x)} E · ${num(-r.pos.z)} N`,
       home: () => ({ disabled: app.roverAtHome() && !r.target }),
+    },
+  };
+}
+
+export function partView(app, id) {
+  const part = ROVER_PARTS.find((p) => p.id === id);
+  const r = app.rover;
+  const deg = (rad) => `${Math.round((rad * 180) / Math.PI)}°`;
+  const rows = {
+    mast: () => [["Pan", deg(r.mastHead.rotation.y)], ["Tilt", deg(r.mastTilt.rotation.x)], ["Mode", r.moving ? "Navigation (look-ahead)" : "Panorama scan"]],
+    libs: () => [["Status", r.busy ? "Targeting" : "Standby"], ["Range", "≈ 7 m (instrument class)"], ["Mounted on", "Mast head"]],
+    arm: () => [["Deployment", pct(r.armDeploy)], ["Turret", r.armDeploy > 0.95 ? "Drilling / brushing" : "Stowed"], ["Task", r.task]],
+    hga: () => [["Azimuth (body)", deg(r.hga.rotation.y)], ["Link", "Locked to comms tower"], ["Comms LED", "Blinking = link active"]],
+    power: () => [["Battery", pct(r.battery)], ["Odometer", `${num(r.odometer)} m`], ["Charging", app.roverAtHome() && !r.moving ? "Yes (garage)" : "No"]],
+    wheels: () => [["Speed", `${r.speed.toFixed(1)} m/s`], ["Pitch / roll", `${r.telemetry().pitch.toFixed(1)}° / ${r.telemetry().roll.toFixed(1)}°`], ["Corner steering", deg(r.wheels[0].steer.rotation.y)]],
+    nav: () => [["Hazard map", r.moving ? "Updating" : "Idle"], ["Heading", `${Math.round(r.telemetry().heading)}°`], ["Autonomy", "Obstacle avoidance on"]],
+  }[id];
+  return {
+    key: `part:${id}`,
+    eyebrow: "Rover FR-1 · component",
+    title: part.name,
+    html: `<p>${esc(part.desc)}</p>
+      ${teleTable(rows(), "p")}
+      <div class="btn-row">
+        <button class="btn" data-action="mode" data-mode="roverInspect"><i>${ICONS.inspect}</i>Inspect exterior</button>
+        <button class="btn" data-action="open-rover">All rover telemetry</button>
+      </div>
+      <p class="fine" style="margin-top:12px">FR-1 is a hypothetical crewed-era rover. Instrument descriptions follow real Mars rover instrument classes.</p>`,
+    binds: teleBinds(app, rows, "p", rows().length),
+  };
+}
+
+export function timeView(app) {
+  const swatch = {
+    sunrise: "linear-gradient(180deg,#5b6f93,#e7a26b)",
+    midday: "linear-gradient(180deg,#9c6a4b,#e3b58d)",
+    sunset: "linear-gradient(180deg,#3f4a6a,#d06a35)",
+    blue: "linear-gradient(180deg,#1b2338,#6f8fc0)",
+    night: "linear-gradient(180deg,#05060b,#1b1b2b)",
+  };
+  return {
+    key: "time",
+    eyebrow: "Time & light",
+    title: "Lighting Presets",
+    html: `
+      <p>Presets fast-forward the simulation to that local solar time, so the sun, shadows, sky and settlement lights all change together. The simulation keeps running through the time-lapse.</p>
+      <div class="presets">${app.presets
+        .map(
+          (p) => `<button class="preset" data-action="preset" data-id="${p.id}"><span class="sw" style="background:${swatch[p.id]}"></span>
+          <b>${esc(p.label)}</b><small>${esc(p.hint)}</small></button>`
+        )
+        .join("")}</div>
+      <div class="section-title">Simulation speed</div>
+      <div class="seg" data-bind="speeds"></div>
+      <div class="btn-row"><button class="btn" data-action="pause" data-bind="pause"></button></div>
+      <div class="section-title">Now</div>
+      ${teleTable([["Local solar time"], ["Sun elevation"], ["Sky"]], "n")}`,
+    binds: {
+      speeds: () => ({
+        html: app.speeds.map((sp, i) => `<button class="${i === app.speedIdx ? "active" : ""}" data-action="speed" data-idx="${i}">${sp.label}</button>`).join(""),
+      }),
+      pause: () => (app.paused ? "Resume time" : "Pause time"),
+      n0: () => (app.timeLapse ? `${clockString(app.sim)} · time-lapse` : clockString(app.sim)),
+      n1: () => `${((Math.asin(Math.max(-1, Math.min(1, app.sunDir.y))) * 180) / Math.PI).toFixed(1)}°`,
+      n2: () => {
+        const e = app.sunDir.y;
+        const lt = localTime(app.sim);
+        if (e > 0.25) return "Daylight";
+        if (e > 0) return lt < 0.5 ? "Morning, low sun" : "Evening, low sun";
+        if (e > -0.2) return "Twilight";
+        return "Night";
+      },
     },
   };
 }
@@ -469,8 +547,8 @@ export function settingsView(app) {
     title: "Settings",
     html: `
       <div class="setting"><label>Render quality · currently ${esc(app.quality.name)}</label>
-        ${seg("quality", [["auto", "Auto"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], st.quality)}
-        <p class="fine" style="margin-top:6px">Changing quality reloads the scene; your settlement is saved.</p></div>
+        ${seg("quality", [["auto", "Automatic"], ["low", "Low"], ["balanced", "Balanced"], ["high", "High"]], st.quality === "medium" ? "balanced" : st.quality)}
+        <p class="fine" style="margin-top:6px">Automatic measures real frame rate and steps effects down if needed. Changing quality reloads the scene; your settlement is saved.</p></div>
       <button class="toggle" role="switch" data-action="setting-toggle" data-name="sound" data-bind="sw-sound"><div><div class="t-label">Ambient sound</div><div class="t-hint">Wind, habitat hum and interface cues</div></div><span class="switch"></span></button>
       <div class="setting"><label>Volume</label><input type="range" min="0" max="1" step="0.05" value="${st.volume}" data-input="volume" aria-label="Volume"/></div>
       <button class="toggle" role="switch" data-action="setting-toggle" data-name="labels" data-bind="sw-labels"><div><div class="t-label">Structure labels</div><div class="t-hint">Floating names on buildings and sites</div></div><span class="switch"></span></button>

@@ -68,7 +68,45 @@ Notes:
 | Inspect a structure   | tap it or its label              | click                           |
 | Drive the rover       | Rover view → tap the ground      | Rover view → click the ground   |
 | Camera views          | bottom pill                      | bottom pill or keys `1`–`5`     |
+| Lighting presets      | tap the clock → Time & light     | click the clock                 |
+| Cinematic mode        | film button (top right)          | film button or `C`; `Esc` exits |
+| Rover inspect/Mastcam | Rover panel → Inspect / Mastcam  | same                            |
 | Pause / speed of time | clock in the top-left            | clock, or `Space` to pause      |
+
+## V2: realism & immersion
+
+- **Photographic terrain:** CC0 Poly Haven sets (regolith, bedrock, layered strata), packed for
+  mobile and blended in a custom terrain shader:
+  - two rotated scales plus a macro mask, so there is no visible tiling;
+  - slope-driven bedrock, and horizontal strata on steep walls (mesa, crater walls);
+  - mid-scale structure that still reads from orbit distance, and far-distance fade-out.
+- **Geology:** derivative-damped ("eroded") mountains, irregular crater rims, central peaks,
+  hummocky ejecta, boulders clustered on crater rims, and bright wind streaks trailing downwind
+  of craters.
+- **Atmosphere:** height-dependent dust haze with sun-side forward scattering (aerial
+  perspective) on every material. A sky shader with blue sunsets and twilight afterglow drives
+  image-based lighting (a PMREM environment map that is regenerated as the sun moves).
+- **Lighting presets:** Sunrise, Midday, Sunset, Blue hour and Night time-lapse the simulation
+  to that local solar time, so sun, shadows, sky, haze and settlement lights stay consistent.
+- **PBR material system:** procedural packed maps (painted panels with seams and grime
+  streaks, quilted MLI insulation, brushed metal, gold foil, composite, sintered regolith,
+  rubber, solar cells). They are mapped triplanar in object space with a dust layer: up-facing
+  surfaces and the lowest metre collect dust and lose metalness. Greenhouse glass uses a
+  Fresnel term. Solar modules visibly dull as simulated dust builds up.
+- **Architecture:** a regolith sandbag shielding wall, an insulated pressure shell with ribs and
+  ring frames, sunshaded windows, an airlock with suitports, handrails and a status light,
+  roof radiators, conduits, vertical-farm racks with HVAC, framed solar modules on torque tubes
+  with drive motors, battery thermal units, a guyed comms tower with a back-structured dish, and
+  ground contact shadows and night light pools (one draw call each).
+- **Rover:** rocker-bogie linkage, chevron-grouser wheels with corner steering, a pan/tilt mast
+  with stereo cameras and a laser spectrometer, a five-joint arm that deploys at survey sites,
+  a tracking high-gain antenna, hazcams, lidar and status LEDs. It has an **Inspect** mode with
+  tappable component hotspots, and a first-person **Mastcam** view.
+- **Cinematic mode:** seven composed shots with smootherstep dollies, crossfades, letterbox and
+  captions, and the UI hidden.
+- **Graphics settings:** Low / Balanced / High / **Automatic**. Automatic lowers resolution,
+  then sheds shadows and effects live if the frame rate stays low, and remembers that for the
+  next launch. A lost WebGL context gets a reload prompt instead of a frozen page.
 
 ## What's inside
 
@@ -94,7 +132,7 @@ Notes:
 - **Missions:** 12 objectives (inspection, comms, driving, geology surveys, dust patrol, blue
   sunset, steady state, autonomy engineering, storm survival) with toasts, sound cues and unlockable
   log entries. Progress is saved in `localStorage`.
-- **Performance:** device-aware Low/Medium/High tiers, adaptive resolution (FrameGovernor),
+- **Performance:** device-aware Low/Balanced/High tiers, adaptive resolution (FrameGovernor),
   throttled shadow updates, instancing, merged geometry, and an optional performance readout in
   Settings.
 
@@ -102,9 +140,12 @@ Notes:
 
 - The simulation is educational. It is **not** a validated engineering model: seasons, failures,
   CO₂/N₂ balance, thermal and radiation dose are not modelled (see Methodology in the app).
-- It was tested in headless Chromium with iPhone 15 Pro emulation and at desktop size, using a
-  software GPU. It has **not** been run on a physical iPhone. Real Safari/WebKit performance and
-  touch feel still need checking on the device.
+- It was tested in headless Chromium with iPhone 15 Pro / iPhone SE emulation and at desktop
+  size, using a software GPU. It has **not** been run on a physical iPhone. Real Safari/WebKit
+  performance and touch feel still need checking on the device. Automatic quality exists for
+  exactly this reason.
+- Structures and the rover are procedural geometry with procedural PBR materials, not scanned or
+  artist-made GLB models. Only the terrain uses photographic textures.
 - The rover drives far faster than real Mars rovers, for interactivity.
 
 ## Project layout
@@ -121,5 +162,6 @@ src/
   audio/audio.js     synthesised ambience (no audio files)
 public/              PWA manifest, icons, service worker
 tests/               engine unit tests
-scripts/             smoke test + icon renderer (Playwright)
+scripts/             smoke test, visual QC gallery, icon renderer (Playwright), texture packer (Python)
+public/textures/     packed CC0 terrain textures (see CREDITS.md)
 ```

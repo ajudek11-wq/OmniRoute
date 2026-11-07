@@ -42,6 +42,7 @@ export class HUD {
     // Camera views
     const views = this.$("views");
     views.innerHTML = Object.entries(CAMERA_MODES)
+      .filter(([, m]) => !m.hidden)
       .map(([k, m]) => `<button class="view-btn" data-mode="${k}" aria-label="${m.label} view"><i>${ICONS[k]}</i><span>${m.label}</span></button>`)
       .join("");
     views.addEventListener("click", (e) => {
@@ -64,7 +65,9 @@ export class HUD {
 
     this.$("btn-settings").innerHTML = ICONS.settings;
     this.$("btn-settings").addEventListener("click", () => app.toggleTab("settings"));
-    this.$("btn-sound").addEventListener("click", () => app.toggleSound());
+    this.$("btn-cine").innerHTML = ICONS.film;
+    this.$("btn-cine").addEventListener("click", () => app.toggleCinematic(true));
+    this.$("clock-open").addEventListener("click", () => app.toggleTab("time"));
     this.$("btn-play").addEventListener("click", () => app.togglePause());
     this.$("btn-speed").addEventListener("click", () => app.cycleSpeed());
     this.clockSol = this.$("clock-sol");
@@ -74,18 +77,17 @@ export class HUD {
   setTab(tab) {
     for (const b of document.querySelectorAll(".dock-btn")) b.classList.toggle("active", b.dataset.tab === tab);
     this.$("btn-settings").classList.toggle("on", tab === "settings");
+    this.$("clock-open").classList.toggle("on", tab === "time");
   }
 
   setMode(mode) {
     for (const b of document.querySelectorAll(".view-btn")) b.classList.toggle("active", b.dataset.mode === mode);
-    this.$("drive-hint").hidden = mode !== "rover";
+    this.$("drive-hint").hidden = mode !== "rover" && mode !== "mastcam";
+    this.$("mastcam-hud").hidden = mode !== "mastcam";
   }
 
-  setSound(on) {
-    const b = this.$("btn-sound");
-    b.innerHTML = on ? ICONS.soundOn : ICONS.soundOff;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-label", on ? "Sound on" : "Sound off");
+  setSound() {
+    /* sound lives in Settings and on the start screen */
   }
 
   setTime(paused, speedLabel) {

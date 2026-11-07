@@ -1,11 +1,14 @@
 import "./styles.css";
 import * as THREE from "three";
-import { resolveQuality, FrameGovernor, isMobileDevice } from "./core/quality.js";
+import { resolveQuality, FrameGovernor, isMobileDevice, rememberPerf } from "./core/quality.js";
 import { createWorld } from "./scene/world.js";
-import { buildTerrain, buildDetailTextures, buildRocks, buildPaths, heightAt } from "./scene/terrain.js";
+import { buildTerrain, buildRocks, buildPaths, heightAt } from "./scene/terrain.js";
 import { buildSettlement, PANEL_AREA } from "./scene/settlement.js";
-import { Rover } from "./scene/rover.js";
+import { Rover, ROVER_PARTS } from "./scene/rover.js";
 import { CameraRig, CAMERA_MODES } from "./scene/cameraRig.js";
+import { Cinematic } from "./scene/cinematic.js";
+import { configureSurfaces, loadGroundSets, terrainMaterial, rockMaterial, installAtmosphere } from "./scene/surfaces.js";
+import { SOL_SECONDS } from "./sim/constants.js";
 import { AudioEngine } from "./audio/audio.js";
 import {
   createState,
@@ -39,6 +42,8 @@ import {
   settingsView,
   methodologyView,
   updateSliderOutput,
+  timeView,
+  partView,
 } from "./ui/panels.js";
 
 const SAVE_KEY = "mars-frontier:save:v2";
@@ -48,6 +53,14 @@ const SPEEDS = [
   { label: "10m/s", v: 600 },
   { label: "1h/s", v: 3600 },
   { label: "4h/s", v: 14400 },
+];
+/** Lighting presets = local solar time (fraction of a sol) at the settlement's latitude. */
+export const LIGHT_PRESETS = [
+  { id: "sunrise", label: "Sunrise", frac: 0.272, hint: "Warm, low-angle light · sun ≈ 6° up" },
+  { id: "midday", label: "Midday", frac: 0.5, hint: "Sharp overhead sunlight · sun ≈ 50° up" },
+  { id: "sunset", label: "Sunset", frac: 0.727, hint: "Long shadows, deep rust tones" },
+  { id: "blue", label: "Blue hour", frac: 0.762, hint: "Sun just below the horizon · blue glow" },
+  { id: "night", label: "Night", frac: 0.9, hint: "Settlement lighting, stars, Earth" },
 ];
 const LABEL_HEIGHT = { habitat: 15.5, lab: 10.5, greenhouse: 8.5, solar: 7, battery: 5.5, comms: 18, water: 9, garage: 8.5, landing: 19, fission: 10 };
 
@@ -97,6 +110,7 @@ class App {
     this.quality = resolveQuality(this.settings.quality);
     const fill = document.getElementById("loading-fill");
     const stage = document.getElementById("loading-stage");
+    const canvas = document.getElementById("scene");
     const progress = async (p, text) => {
       fill.style.width = `${p * 100}%`;
       stage.textContent = text;
@@ -105,33 +119,30 @@ class App {
 
     try {
       await progress(0.06, "Calibrating renderer");
-      const canvas = document.getElementById("scene");
       this.world = createWorld(canvas, this.quality);
       this.renderer = this.world.renderer;
       const { scene, camera } = this.world;
 
-      await progress(0.18, "Generating Arcadia Planitia terrain");
       const aniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
-      this.detail = buildDetailTextures(aniso);
-      const terrainGeo = buildTerrain(this.quality.terrain);
-      const terrainMat = new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        roughness: 0.96,
-        metalness: 0,
-        map: this.detail.map,
-        normalMap: this.detail.normalMap,
-        normalScale: new THREE.Vector2(0.7, 0.7),
+      configureSurfaces({ size: this.quality.surfSize, anisotropy: Math.min(4, aniso) });
+      await progress(0.1, "Streaming surface textures");
+      const sets = await loadGroundSets(this.quality.texSize, aniso, (f) => {
+        fill.style.width = `${(0.1 + f * 0.12) * 100}%`;
       });
-      this.terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      if (sets.fallback) document.getElementById("loading-note").textContent = "Photographic textures unavailable. Using procedural surfaces.";
+
+      await progress(0.24, "Generating Arcadia Planitia terrain");
+      const terrainGeo = buildTerrain(this.quality.terrain);
+      this.terrain = new THREE.Mesh(terrainGeo, terrainMaterial(sets, { low: this.quality.terrainLow }));
       this.terrain.receiveShadow = true;
       scene.add(this.terrain);
 
-      await progress(0.42, "Scattering boulders and regolith");
-      scene.add(buildRocks(this.quality.rocks, this.quality.key === "high"));
-      scene.add(buildPaths(this.detail.map));
+      await progress(0.44, "Scattering boulders and ejecta");
+      scene.add(buildRocks(this.quality.rocks, this.quality.key === "high", rockMaterial(sets), this.quality.rockDetail));
+      scene.add(buildPaths());
 
       await progress(0.6, "Constructing settlement");
-      this.settlement = buildSettlement();
+      this.settlement = buildSettlement(this.quality);
       scene.add(this.settlement.root);
       this.maxPanels = this.settlement.structures.solar.maxPanels;
 
@@ -143,7 +154,8 @@ class App {
       this.initState();
       this.rig = new CameraRig(camera, canvas);
       this.rig.reduceMotion = this.settings.reduceMotion;
-      this.governor = new FrameGovernor(this.renderer, this.quality);
+      this.governor = new FrameGovernor(this.renderer, this.quality, { degrade: (stage) => this.degrade(stage) });
+      this.cinematic = new Cinematic(this);
       this.audio = new AudioEngine();
       this.audio.volume = this.settings.volume;
       this.hud = new HUD(this);
@@ -154,10 +166,15 @@ class App {
       this.applyVisualConfig();
 
       await progress(0.94, "Compiling shaders");
+      scene.traverse((o) => {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of mats) installAtmosphere(m);
+      });
       this.world.resize();
       this.updateSim(0);
       this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus: new THREE.Vector3(), time: 0, dt: 0, frame: 0 });
       this.renderer.shadowMap.needsUpdate = true;
+      this.world.refreshEnvironment(0, true);
       this.renderer.compile(scene, camera);
       this.renderer.render(scene, camera);
 
@@ -170,7 +187,6 @@ class App {
     }
 
     this.hud.setTime(this.paused, SPEEDS[this.speedIdx].label);
-    this.hud.setSound(false);
     this.hud.setMode(null);
     document.getElementById("chk-sound").checked = this.settings.sound;
     document.getElementById("loading-actions").hidden = false;
@@ -179,7 +195,19 @@ class App {
       : "Drag to orbit · scroll to zoom · right-drag to pan · click buildings to inspect";
     document.getElementById("btn-enter").addEventListener("click", () => this.enter(), { once: true });
 
-    window.addEventListener("resize", () => this.world.resize());
+    const onResize = () => {
+      this.world.resize();
+      this.labels.forEach((L) => (L.w = 0));
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", () => setTimeout(onResize, 250));
+    window.visualViewport?.addEventListener("resize", onResize);
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      this.save();
+      this.hud.toast("Graphics paused", "The GPU reset the 3D view. Tap to reload.", "warn", 60000);
+      document.getElementById("toasts").addEventListener("click", () => location.reload(), { once: true });
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) this.save();
       this.lastTime = performance.now();
@@ -189,6 +217,21 @@ class App {
     this.lastTime = performance.now();
     this.started = false;
     this.renderer.setAnimationLoop(() => this.tick());
+  }
+
+  /** Automatic quality: shed the most expensive features live if the device can't keep up. */
+  degrade(stage) {
+    if (stage === 1) {
+      this.world.setShadows(false);
+      this.quality.envMap = false;
+      rememberPerf("balanced");
+    } else if (stage === 2) {
+      this.world.scene.traverse((o) => {
+        if (o.isPoints && o.material.size < 1) o.visible = false;
+      });
+      rememberPerf("low");
+    } else return;
+    this.hud.toast("Graphics adjusted", "Automatic quality reduced effects to keep the view smooth.", "info", 3500);
   }
 
   // ── State ────────────────────────────────────────────────
@@ -212,6 +255,9 @@ class App {
       r.battery = saved.rover.battery ?? 1;
       r.task = "Idle";
     }
+    this.presets = LIGHT_PRESETS;
+    this.speeds = SPEEDS;
+    this.timeLapse = null;
     this.roverTask = null;
     this.reportCooldown = 0;
     this.selected = null;
@@ -303,6 +349,10 @@ class App {
     }
     const rp = new THREE.Vector3();
     add("rover", "rover", "Rover FR-1", () => rp.copy(this.rover.pos).setY(this.rover.pos.y + 5), 900);
+    for (const part of ROVER_PARTS) {
+      const pp = new THREE.Vector3();
+      add("part", part.id, part.name, () => this.rover.parts[part.id].getWorldPosition(pp), 40);
+    }
     document.getElementById("app").classList.toggle("label-hidden", !this.settings.labels);
   }
 
@@ -326,7 +376,12 @@ class App {
     const occ = this.occluders ?? [];
     const cands = [];
     for (const L of this.labels) {
-      const key = L.kind === "structure" ? L.id : L.kind === "site" ? `site:${L.id}` : "rover";
+      const key = L.kind === "structure" ? L.id : L.kind === "site" ? `site:${L.id}` : L.kind === "part" ? `part:${L.id}` : "rover";
+      const inspecting = this.rig.mode === "roverInspect";
+      if ((L.kind === "part") !== inspecting || this.rig.mode === "mastcam" || this.cinematic.active) {
+        L.show = false;
+        continue;
+      }
       const active = this.selected?.key === key;
       const objective = focus === key;
       L.el.classList.toggle("active", active);
@@ -345,6 +400,7 @@ class App {
       const y = (-v.y * 0.5 + 0.5) * h;
       const rect = { l: x - L.w / 2, r: x + L.w / 2, t: y - L.h, b: y };
       const prio = (active ? -1e6 : 0) + (objective ? -5e5 : 0) + (L.kind === "rover" ? -1e3 : 0) + dist;
+      if (L.kind === "part" && L.el.style.zIndex !== "2") L.el.style.zIndex = "2";
       cands.push({ L, x, y, rect, prio, dist });
     }
     cands.sort((a, b) => a.prio - b.prio);
@@ -386,6 +442,11 @@ class App {
 
   select(kind, id, { focus = true } = {}) {
     this.audio.select();
+    if (kind === "part") {
+      this.selected = { kind, id, key: `part:${id}` };
+      this.sheet.open(partView(this, id));
+      return;
+    }
     if (kind === "rover") {
       this.selected = { kind, id: "rover", key: "rover" };
       this.sheet.open(roverView(this));
@@ -451,7 +512,10 @@ class App {
       else if (e.key === " ") {
         e.preventDefault();
         this.togglePause();
-      } else if (e.key === "Escape") this.sheet.close();
+      } else if (e.key === "Escape") {
+        if (this.cinematic.active) this.toggleCinematic(false);
+        else this.sheet.close();
+      } else if (e.key === "c") this.toggleCinematic(!this.cinematic.active);
     });
   }
 
@@ -459,7 +523,8 @@ class App {
     if (!this.started) return;
     const rc = this.raycaster;
     rc.setFromCamera(ndc, this.world.camera);
-    const hits = rc.intersectObjects([...this.settlement.pickables, this.rover.hit], false);
+    const firstPerson = this.rig.mode === "mastcam";
+    const hits = rc.intersectObjects(firstPerson ? this.settlement.pickables : [...this.settlement.pickables, this.rover.hit], false);
     const terrainHit = rc.intersectObject(this.terrain, false)[0];
     const hit = hits.find((h) => !terrainHit || h.distance < terrainHit.distance + 2);
     if (hit) {
@@ -467,10 +532,11 @@ class App {
       this.select(pick.kind, pick.id, { focus: true });
       return;
     }
-    if (this.rig.mode === "rover" && terrainHit) {
+    if ((this.rig.mode === "rover" || firstPerson) && terrainHit) {
       const p = terrainHit.point;
       if (this.roverTask && this.roverTask.type !== "manual") this.hud.toast("Task cancelled", "Manual drive command overrides the rover's task.", "warn", 2600);
       this.roverTask = { type: "manual" };
+      this.rover.busy = false;
       this.rover.driveTo(p.x, p.z, "Driving to waypoint", () => {
         this.rover.task = "Holding at waypoint";
         this.roverTask = null;
@@ -537,6 +603,28 @@ class App {
       }
       case "mode":
         this.setMode(data.mode);
+        break;
+      case "preset":
+        this.applyPreset(data.id);
+        break;
+      case "speed":
+        this.speedIdx = Number(data.idx);
+        this.paused = false;
+        this.hud.setTime(this.paused, SPEEDS[this.speedIdx].label);
+        this.sheet.refresh();
+        break;
+      case "pause":
+        this.togglePause();
+        this.sheet.refresh();
+        break;
+      case "cinematic":
+        this.toggleCinematic(true);
+        break;
+      case "part":
+        this.select("part", data.id);
+        break;
+      case "open-rover":
+        this.select("rover", "rover");
         break;
       case "mission-go": {
         const m = MISSIONS.find((x) => x.id === data.id);
@@ -638,8 +726,11 @@ class App {
   }
 
   setMode(mode) {
+    if (this.cinematic?.active) this.toggleCinematic(false);
     this.rig.setMode(mode, this.rover);
     this.hud.setMode(mode);
+    document.getElementById("app").classList.toggle("mastcam", mode === "mastcam");
+    if (mode !== "mastcam") this.world.resize();
     this.audio.tap();
     if (mode === "rover" && !this.settings.seenDriveHint) {
       this.settings.seenDriveHint = true;
@@ -648,12 +739,45 @@ class App {
     }
   }
 
+  /** Lighting presets run the simulation forward as a smooth time-lapse to that local time. */
+  applyPreset(id) {
+    const preset = LIGHT_PRESETS.find((p) => p.id === id);
+    if (!preset) return;
+    const now = localTime(this.sim);
+    let delta = preset.frac - now;
+    if (delta < 0) delta += 1;
+    if (delta < 0.002) return;
+    const total = delta * SOL_SECONDS;
+    const dur = this.settings.reduceMotion ? 0.05 : 2.6;
+    this.timeLapse = { remaining: total, rate: total / dur, label: preset.label };
+    this.paused = false;
+    this.hud.setTime(this.paused, SPEEDS[this.speedIdx].label);
+    this.audio.tap();
+  }
+
+  toggleCinematic(on) {
+    if (on === this.cinematic.active) return;
+    if (on) {
+      this.sheet.close();
+      this.rig.cinematic = true;
+      this.rig.controls.enabled = false;
+      this.cinematic.start();
+      this.hud.toast("Cinematic mode", "Tap anywhere to return.", "info", 2500);
+    } else {
+      this.cinematic.stop();
+      this.rig.cinematic = false;
+      this.rig.controls.enabled = true;
+      this.rig.setMode("orbit", this.rover, { duration: 2.2 });
+      this.hud.setMode("orbit");
+    }
+  }
+
   toggleTab(tab) {
     if (this.sheet.isOpen(tab)) {
       this.sheet.close();
       return;
     }
-    const views = { missions: missionsView, systems: systemsView, scenario: scenarioView, log: logView, settings: settingsView };
+    const views = { missions: missionsView, systems: systemsView, scenario: scenarioView, log: logView, settings: settingsView, time: timeView };
     this.selected = null;
     this.sheet.open(views[tab](this));
     this.audio.tap();
@@ -680,10 +804,12 @@ class App {
     if (this.roverBusy() || this.surveyed.has(id)) return;
     const site = SURVEY_SITES.find((s) => s.id === id);
     this.roverTask = { type: "survey", site: id, phase: "drive" };
+    this.rover.busy = true;
     this.rover.driveTo(site.x, site.z, `En route to ${site.name}`, () => {
       this.roverTask.phase = "survey";
-      this.roverTask.t = 4.5;
-      this.rover.task = `Surveying ${site.name}`;
+      this.roverTask.t = 6;
+      this.rover.armTarget = 1;
+      this.rover.task = `Surveying ${site.name} · arm deployed`;
     });
     this.hud.toast(`Rover dispatched · ${site.name}`, "Switch to Rover view to ride along.", "info", 3500);
     this.audio.tap();
@@ -692,6 +818,7 @@ class App {
   dispatchClean() {
     if (this.roverBusy()) return;
     this.roverTask = { type: "clean", phase: "drive" };
+    this.rover.busy = true;
     this.rover.driveTo(SOLAR_SERVICE_POINT.x, SOLAR_SERVICE_POINT.z, "En route to solar field", () => {
       this.roverTask.phase = "clean";
       this.roverTask.t = 5;
@@ -714,6 +841,8 @@ class App {
       this.hud.toast(`Survey complete · ${site.name}`, site.finding, "success", 7000);
       this.audio.chime();
       this.rover.task = "Survey complete · idle";
+      this.rover.armTarget = 0;
+      this.rover.busy = false;
       this.roverTask = null;
       this.missions.emit({ type: "survey", id: site.id }, this.ctx());
     } else if (task.type === "clean") {
@@ -721,6 +850,7 @@ class App {
       this.missions.emit({ type: "clean" }, this.ctx());
       this.hud.toast("Arrays cleaned", "Solar output restored to 100%.", "success");
       this.rover.task = "Cleaning complete · idle";
+      this.rover.busy = false;
       this.roverTask = null;
       this.scheduleProjection();
     }
@@ -761,7 +891,12 @@ class App {
   // ── Main loop ────────────────────────────────────────────
   updateSim(dtReal) {
     const sim = this.sim;
-    if (!this.paused && this.started && dtReal > 0) step(sim, dtReal * SPEEDS[this.speedIdx].v);
+    if (this.timeLapse && dtReal > 0) {
+      const dts = Math.min(this.timeLapse.remaining, this.timeLapse.rate * dtReal);
+      step(sim, dts);
+      this.timeLapse.remaining -= dts;
+      if (this.timeLapse.remaining <= 1) this.timeLapse = null;
+    } else if (!this.paused && this.started && dtReal > 0) step(sim, dtReal * SPEEDS[this.speedIdx].v);
     else if (!sim.flows) step(sim, 1);
     this.summary = summarize(sim);
     const s = sunVector(localTime(sim));
@@ -813,10 +948,10 @@ class App {
     garage.setOpen(gd < 18);
 
     this.rig.update(dt);
+    if (this.cinematic.active) this.cinematic.update(dt, this.world.camera);
     const focus = this.rig.controls.target;
     const env = this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus, time: t, dt, frame: this.frame });
     this.settlement.update(t, env, this.sim);
-    this.rover.lights.material.emissiveIntensity = 0.3 + env.night * 2.6;
 
     // Selection ring
     if (this.selected) {
@@ -856,6 +991,10 @@ class App {
       if (this.sheet.isOpen()) this.sheet.refresh();
       this.updateOccluders();
       this.missions.tick(this.ctx());
+      if (this.rig.mode === "mastcam") {
+        const az = ((((this.rover.heading + this.rig.look.yaw) * 180) / Math.PI) % 360 + 360) % 360;
+        document.getElementById("mc-readout").textContent = `AZ ${String(Math.round(az)).padStart(3, "0")}° EL ${Math.round((this.rig.look.pitch * 180) / Math.PI)}°`;
+      }
       if (this.fpsEl && this.settings.fps) {
         this.fpsEl.textContent = `${Math.round(this.governor.fps)} fps · ${this.governor.dpr.toFixed(2)}× · ${this.renderer.info.render.calls} calls`;
       }

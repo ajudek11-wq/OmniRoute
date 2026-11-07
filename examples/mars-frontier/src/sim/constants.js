@@ -5,6 +5,7 @@
  *  reference  — published NASA planning or design values (rounded)
  *  assumption — operating choices for this outpost; adjustable
  *  estimate   — simplified educational estimates, NOT engineering predictions
+ *  hypothetical — future technology that does not yet exist at this scale on Mars
  */
 
 export const SOL_SECONDS = 88775.244; // 24 h 39 m 35 s
@@ -26,6 +27,10 @@ export const CATEGORIES = {
   estimate: {
     label: "Estimate",
     desc: "Simplified educational estimate. Not a validated engineering prediction.",
+  },
+  hypothetical: {
+    label: "Hypothetical",
+    desc: "Future technology not yet demonstrated at this scale on Mars. Values are planning-level guesses.",
   },
 };
 
@@ -99,8 +104,8 @@ export const PARAMS = {
     value: 10,
     unit: "kWe",
     label: "Fission surface power unit output",
-    category: "reference",
-    source: "NASA Kilopower concept, 10 kWe class (KRUSTY ground test 2018)",
+    category: "hypothetical",
+    source: "Design target of NASA's Kilopower concept (KRUSTY ground test, 2018). Not yet flown",
   },
   habitatBaseKW: {
     value: 6,
@@ -150,28 +155,28 @@ export const PARAMS = {
     value: 2.5,
     unit: "kW/unit",
     label: "CO₂→O₂ ISRU unit power",
-    category: "assumption",
+    category: "hypothetical",
     source: "Scaled-up solid-oxide electrolysis",
   },
   isruO2Rate: {
     value: 0.2 * SOL_HOURS,
     unit: "kg/sol/unit",
     label: "CO₂→O₂ ISRU output",
-    category: "assumption",
+    category: "hypothetical",
     source: "0.2 kg/h per unit. For scale: MOXIE on Perseverance measured ~6–12 g/h at ~300 W",
   },
   waterExtractorKW: {
     value: 4,
     unit: "kW",
     label: "Ground-ice water extractor power",
-    category: "assumption",
+    category: "hypothetical",
     source: "",
   },
   waterExtractorRate: {
     value: 1.5 * SOL_HOURS,
     unit: "kg/sol",
     label: "Ground-ice water extractor output",
-    category: "assumption",
+    category: "hypothetical",
     source: "1.5 kg/h from ice-rich regolith",
   },
   // ── Crew metabolism ─────────────────────────────────────────
