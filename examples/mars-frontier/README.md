@@ -30,6 +30,14 @@ npm test             # simulation engine unit tests (node:test, no extra deps)
 npm run smoke        # headless browser smoke test — needs Playwright and a running `npm run preview`
 ```
 
+## Easiest way: one click for your iPhone
+
+On the Windows laptop, double-click **`start-on-phone.bat`** in this folder (first run installs
+dependencies). It builds the app and prints an address such as `http://192.168.1.23:4173/`.
+Type that into Safari on the iPhone (same Wi-Fi). Close the window to stop.
+
+From a terminal the same thing is `npm run phone`. The steps below are the manual version.
+
 ## Open it on your iPhone (Windows laptop, same Wi-Fi)
 
 1. On the laptop, run `npm run dev`. Vite prints two URLs; use the **Network** one, e.g.
