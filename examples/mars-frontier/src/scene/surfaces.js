@@ -492,6 +492,33 @@ function macroTexture() {
   return t;
 }
 
+/**
+ * Layered-rock helpers shared by the terrain walls and the rock material.
+ *  - rkHash: sin-free hash (stable on mobile GPUs at large arguments).
+ *  - rkNoise: cheap 3D value noise for macro tone variation (ALU only, no texture fetch).
+ *  - rkBands: sedimentary bedding that follows height. Returns (tone, bedding line, AA weight).
+ *    Bed thickness varies with height; the thin dark lines are faded out once they get thinner than a
+ *    few pixels so distant walls never moiré. LANDMARK_BANDS in landmarks.js mirrors this formula.
+ */
+const LAYERS_GLSL = /* glsl */ `
+float rkHash( float p ) { p = fract( p * 0.1031 ); p *= p + 33.33; p *= p + p; return fract( p ); }
+float rkNoise( vec3 p ) {
+  vec3 i = floor( p ); vec3 f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
+  float n = dot( i, vec3( 1.0, 57.0, 113.0 ) );
+  return mix( mix( mix( rkHash( n ), rkHash( n + 1.0 ), f.x ), mix( rkHash( n + 57.0 ), rkHash( n + 58.0 ), f.x ), f.y ),
+              mix( mix( rkHash( n + 113.0 ), rkHash( n + 114.0 ), f.x ), mix( rkHash( n + 170.0 ), rkHash( n + 171.0 ), f.x ), f.y ), f.z );
+}
+vec2 rkRot( vec2 p, float a ) { float c = cos( a ), s = sin( a ); return vec2( c * p.x - s * p.y, s * p.x + c * p.y ); }
+// x: per-bed tone, y: bedding-plane line (0..1), z: bed index
+vec3 rkBands( float y, float period, out float aa ) {
+  float u = y / period + 0.25 * sin( y * 1.9 / period );
+  float L = floor( u );
+  float f = u - L;
+  aa = 1.0 - smoothstep( 0.035, 0.18, fwidth( u ) );
+  float line = max( 1.0 - smoothstep( 0.0, 0.085, f ), smoothstep( 0.93, 1.0, f ) );
+  return vec3( 0.84 + 0.28 * rkHash( L + 17.0 ), line, L );
+}`;
+
 const TERRAIN_VERT_PARS = /* glsl */ `
 attribute vec2 aSurf;
 varying vec2 vSurf;
@@ -506,7 +533,8 @@ uniform sampler2D tMacro;
 varying vec2 vSurf;
 varying vec3 vTWPos;
 varying vec3 vTWNrm;
-vec2 rot2( vec2 p, float a ) { float c = cos( a ), s = sin( a ); return vec2( c * p.x - s * p.y, s * p.x + c * p.y ); }`;
+vec2 rot2( vec2 p, float a ) { float c = cos( a ), s = sin( a ); return vec2( c * p.x - s * p.y, s * p.x + c * p.y ); }
+${LAYERS_GLSL}`;
 
 export function terrainMaterial(sets, { low = false } = {}) {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
@@ -559,34 +587,49 @@ export function terrainMaterial(sets, { low = false } = {}) {
         float strW = smoothstep( 0.32, 0.55, slope );
         vec3 sD = texture2D( tStrD, sideUV / vec2( 14.0, 7.0 ) ).rgb;
         vec3 sN = texture2D( tStrN, sideUV / vec2( 14.0, 7.0 ) ).rgb;
+        // The cliff photo has blown-out highlights; compress them so steep faces never streak white.
+        sD = min( 0.5 + ( sD - 0.5 ) * 0.8, vec3( 0.66 ) );
         vec3 tDet = mix( mix( rD1, bD, rockW ), sD, strW );
         vec3 tNR = mix( mix( rN1, bN, rockW ), sN, strW );
         // Distant terrain converges to its average so mip noise never shimmers.
         float tFar = smoothstep( 120.0, 900.0, length( vTWPos - cameraPosition ) );
-        tDet = clamp( ( tDet - 0.5 ) * 1.55 + 0.5, 0.0, 1.0 );
+        tDet = clamp( ( tDet - 0.5 ) * mix( 1.55, 1.3, strW ) + 0.5, 0.0, 1.0 );
         // Mid-scale structure (tens of metres) so the ground still reads from orbit distance.
         float midL = dot( texture2D( tRockD, rot2( tp, 0.4 ) / 46.0 ).rgb, vec3( 0.333 ) );
         tDet *= mix( 1.0, midL * 2.0, 0.42 );
         tDet = mix( tDet, vec3( 0.5 ), tFar * 0.6 );
         // Rock exposures are darker and cooler than dust; dust brightens with the macro mask.
-        vec3 rockTint = mix( vec3( 1.0 ), vec3( 0.62, 0.55, 0.52 ), rockW * 0.75 + strW * 0.2 );
-        diffuseColor.rgb *= tDet * 2.0 * rockTint * ( 0.9 + macro.r * 0.2 );`
+        vec3 rockTint = mix( vec3( 1.0 ), vec3( 0.62, 0.55, 0.52 ), rockW * 0.75 + strW * 0.3 );
+        // Sedimentary bedding on walls and rock exposures follows world height (warped gently over
+        // hundreds of metres), with per-bed tone/hue and thin darker bedding planes.
+        float twY = vTWPos.y + 1.6 * sin( dot( vTWPos.xz, vec2( 0.021, 0.013 ) ) ) + 0.8 * sin( dot( vTWPos.xz, vec2( -0.011, 0.034 ) ) );
+        float tbAA;
+        vec3 tb = rkBands( twY, 4.2, tbAA );
+        vec3 tbHue = mix( vec3( 1.0 ), vec3( 1.08, 0.96, 0.85 ), rkHash( tb.z + 3.0 ) * 0.8 );
+        vec3 tBand = mix( vec3( 1.0 ), tb.x * tbHue * ( 1.0 - tb.y * 0.32 ), tbAA );
+        tBand = mix( vec3( 1.0 ), tBand, clamp( strW * 0.95 + rockW * 0.3, 0.0, 1.0 ) * ( 1.0 - tFar * 0.7 ) );
+        diffuseColor.rgb *= tDet * 2.0 * rockTint * tBand * ( 0.9 + macro.r * 0.2 );`
       )
       .replace(
         "#include <roughnessmap_fragment>",
         `#include <roughnessmap_fragment>
-        roughnessFactor = clamp( 0.72 + tNR.b * 0.32, 0.6, 1.0 );`
+        roughnessFactor = clamp( 0.72 + tNR.b * 0.32, 0.6, 1.0 );
+        // Rock faces are matte: no glints from the perturbed normals on steep walls.
+        roughnessFactor = mix( roughnessFactor, max( roughnessFactor, 0.92 ), clamp( strW + rockW * 0.6, 0.0, 1.0 ) );`
       )
       .replace(
         "#include <normal_fragment_maps>",
         /* glsl */ `#include <normal_fragment_maps>
         {
-          vec2 nt = ( tNR.rg * 2.0 - 1.0 ) * ( 1.0 - tFar ) * mix( 2.1, 0.9, strW );
-          vec3 nW = tN;
+          // Strong relief on open ground; much gentler on slopes, where the top-projected perturbation
+          // used to tilt normals past the sun and produce bright streaks.
+          vec2 nt = ( tNR.rg * 2.0 - 1.0 ) * ( 1.0 - tFar ) * mix( 2.1, 0.6, smoothstep( 0.1, 0.45, slope ) );
           // Top projection perturbs along world X/Z; side strata perturb along the wall plane.
           vec3 topP = vec3( nt.x, 0.0, nt.y );
           vec3 sideP = abs( tN.x ) > abs( tN.z ) ? vec3( 0.0, nt.y, nt.x ) : vec3( nt.x, nt.y, 0.0 );
-          nW = normalize( nW + mix( topP, sideP, strW ) );
+          vec3 tPert = mix( topP, sideP, strW );
+          tPert -= tN * dot( tPert, tN ); // keep the perturbation in the surface plane
+          vec3 nW = normalize( tN + tPert );
           normal = normalize( ( viewMatrix * vec4( nW, 0.0 ) ).xyz );
         }`
       );
@@ -595,10 +638,23 @@ export function terrainMaterial(sets, { low = false } = {}) {
   return mat;
 }
 
-/** Boulders: triplanar bedrock with a dust cap on their tops. */
-export function rockMaterial(sets) {
-  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0 });
-  const uniforms = { tRockD: { value: sets.bedrock.detail }, tRockN: { value: sets.bedrock.nr }, uDustColor: { value: DUST_COLOR } };
+/**
+ * Rock material for boulders (instanced) and landmarks (`{ landmark: true }`).
+ * Texture fetches per fragment: boulders 6 (bedrock triplanar at two scales, the second rotated);
+ * landmarks 6 (bedrock triplanar 3 + cliff-strata biplanar 2 + one coarse top-down bedrock).
+ * Large-scale structure (macro tone, bedding, height gradient, dust) is procedural ALU.
+ */
+export function rockMaterial(sets, { landmark = false } = {}) {
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0, vertexColors: landmark });
+  // x: fine tiles per object unit, y: coarse tiles per unit, z: macro noise frequency.
+  const scale = landmark ? new THREE.Vector3(1 / 3.2, 1 / 15, 1 / 9) : new THREE.Vector3(2.2, 0.62, 1.3);
+  const uniforms = {
+    tRockD: { value: sets.bedrock.detail },
+    tStrD: { value: sets.strata.detail },
+    uRockScale: { value: scale },
+    uDustColor: { value: DUST_COLOR },
+  };
+  if (landmark) mat.defines = { ROCK_LANDMARK: "" };
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
@@ -606,8 +662,10 @@ export function rockMaterial(sets) {
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
-        vRP = position * 2.2; vRN = normal;
+        vRP = position; vRN = normal;
         #ifdef USE_INSTANCING
+          // Offset each instance's texture space by its position so no two boulders match.
+          vRP += instanceMatrix[3].xyz * 0.173;
           vRUp = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * objectNormal ).y;
         #else
           vRUp = normalize( mat3( modelMatrix ) * objectNormal ).y;
@@ -617,29 +675,90 @@ export function rockMaterial(sets) {
       .replace(
         "#include <common>",
         `#include <common>
-        uniform sampler2D tRockD; uniform sampler2D tRockN; uniform vec3 uDustColor;
-        varying vec3 vRP; varying vec3 vRN; varying float vRUp;`
+        uniform sampler2D tRockD; uniform sampler2D tStrD; uniform vec3 uRockScale; uniform vec3 uDustColor;
+        varying vec3 vRP; varying vec3 vRN; varying float vRUp;
+        ${LAYERS_GLSL}`
       )
       .replace(
         "#include <color_fragment>",
-        `#include <color_fragment>
-        vec3 rw = pow( abs( vRN ), vec3( 4.0 ) ); rw /= rw.x + rw.y + rw.z;
-        vec3 rd = texture2D( tRockD, vRP.zy ).rgb * rw.x + texture2D( tRockD, vRP.xz ).rgb * rw.y + texture2D( tRockD, vRP.xy ).rgb * rw.z;
-        diffuseColor.rgb *= rd * 2.0;
-        float rDust = smoothstep( 0.45, 0.95, vRUp ) * 0.75;
-        diffuseColor.rgb = mix( diffuseColor.rgb, uDustColor * ( rd * 1.6 + 0.2 ), rDust );`
+        /* glsl */ `#include <color_fragment>
+        vec3 rw = pow( abs( vRN ), vec3( 4.0 ) ); rw /= rw.x + rw.y + rw.z + 1e-5;
+        vec3 p1 = vRP * uRockScale.x;
+        vec3 rd = texture2D( tRockD, p1.zy ).rgb * rw.x + texture2D( tRockD, p1.xz ).rgb * rw.y + texture2D( tRockD, p1.xy ).rgb * rw.z;
+        vec3 p2 = vRP * uRockScale.y;
+        #ifdef ROCK_LANDMARK
+          // Bedding follows (gently warped) height, like the layered rock the landmark was carved from.
+          float yw = vRP.y + 1.4 * sin( dot( vRP.xz, vec2( 0.13, 0.09 ) ) ) + 0.8 * sin( dot( vRP.xz, vec2( -0.07, 0.19 ) ) );
+          // Coarse layer: cliff strata on the sides (biplanar, v = height) + one rotated top-down bedrock.
+          vec2 sS = vec2( 1.0 / 14.0, 1.0 / 5.5 );
+          float sW = rw.x + rw.z + 1e-5;
+          vec3 c2 = ( texture2D( tStrD, vec2( vRP.z, yw ) * sS ).rgb * rw.x + texture2D( tStrD, vec2( vRP.x, yw ) * sS ).rgb * rw.z ) / sW;
+          c2 = min( 0.5 + ( c2 - 0.5 ) * 0.8, vec3( 0.68 ) ); // tame the photo's blown highlights
+          c2 = mix( c2, texture2D( tRockD, rkRot( p2.xz, 2.1 ) ).rgb, rw.y );
+        #else
+          vec3 c2 = texture2D( tRockD, rkRot( p2.zy, 0.9 ) ).rgb * rw.x + texture2D( tRockD, rkRot( p2.xz, 2.1 ) ).rgb * rw.y + texture2D( tRockD, rkRot( p2.xy, -1.3 ) ).rgb * rw.z;
+        #endif
+        // Fine detail rides on coarse structure (ratio maps multiply), then macro tone/hue noise.
+        vec3 rRatio = ( 1.0 + ( rd * 2.0 - 1.0 ) * 0.7 ) * ( 1.0 + ( c2 * 2.0 - 1.0 ) * 0.6 );
+        vec3 mp = vRP * uRockScale.z;
+        float rM = rkNoise( mp ) * 0.65 + rkNoise( mp * 2.7 + 11.0 ) * 0.35;
+        rRatio *= ( 0.8 + 0.4 * rM ) * mix( vec3( 1.0 ), vec3( 1.06, 0.97, 0.88 ), smoothstep( 0.55, 0.8, rM ) );
+        float rLine = 0.0;
+        #ifdef ROCK_LANDMARK
+          float bAA;
+          vec3 bnd = rkBands( yw, 2.6, bAA );
+          vec3 bHue = mix( vec3( 1.0 ), vec3( 1.07, 0.96, 0.86 ), rkHash( bnd.z + 3.0 ) * 0.85 );
+          rLine = bnd.y * bAA * ( 1.0 - rw.y );
+          rRatio *= mix( vec3( 1.0 ), bnd.x * bHue, bAA * ( 1.0 - rw.y * 0.5 ) ) * ( 1.0 - rLine * 0.4 );
+          // Broad units + height gradient: darker base, paler wind-scoured upper rock.
+          rRatio *= ( 0.8 + 0.24 * clamp( vRP.y / 44.0, 0.0, 1.0 ) ) * ( 0.94 + 0.08 * sin( yw * 0.23 + 0.5 ) );
+        #endif
+        diffuseColor.rgb *= rRatio;
+        // Overhangs and undersides see less sky.
+        diffuseColor.rgb *= 0.74 + 0.26 * smoothstep( -0.75, -0.05, vRUp );
+        float rLum = dot( rRatio, vec3( 0.333 ) );
+        float rDust = smoothstep( 0.5, 0.93, vRUp ) * 0.75;
+        #ifdef ROCK_LANDMARK
+          rDust = max( rDust, ( 1.0 - smoothstep( 0.0, 1.6 + 2.2 * rM, vRP.y ) ) * 0.6 );
+        #endif
+        rDust = clamp( rDust * ( 1.45 - rLum * 0.45 - rM * 0.3 ), 0.0, 1.0 ); // dust settles in darker hollows first
+        diffuseColor.rgb = mix( diffuseColor.rgb, uDustColor * ( rLum * 0.8 + 0.25 ), rDust );`
+      )
+      .replace(
+        "#include <roughnessmap_fragment>",
+        `#include <roughnessmap_fragment>
+        roughnessFactor = clamp( 0.86 + ( 0.5 - rLum * 0.5 ) * 0.18 + rDust * 0.1, 0.78, 1.0 );`
       )
       .replace(
         "#include <normal_fragment_maps>",
-        `#include <normal_fragment_maps>
-        float rh = dot( rd, vec3( 0.33 ) );
-        vec2 rg = vec2( dFdx( rh ), dFdy( rh ) ) * 0.7;
-        vec3 sX = normalize( dFdx( -vViewPosition ) ); vec3 sY = normalize( dFdy( -vViewPosition ) );
-        vec3 R1 = cross( sY, normal ); vec3 R2 = cross( normal, sX );
-        float fD = dot( sX, R1 ) * faceDirection;
-        normal = normalize( abs( fD ) * normal - sign( fD ) * ( rg.x * R1 + rg.y * R2 ) );`
+        /* glsl */ `#include <normal_fragment_maps>
+        {
+          vec3 sX = dFdx( -vViewPosition ); vec3 sY = dFdy( -vViewPosition );
+          float rView = length( vViewPosition );
+          // (1) Analytic relief (macro lumps, bedding notches): smooth functions, so a scale-correct
+          //     bump (heights in metres, Mikkelsen's unnormalised form) is alias-free at any distance.
+          #ifdef ROCK_LANDMARK
+            float aH = rM * 0.4 - rLine * 0.09;
+          #else
+            float aH = rM * 0.1;
+          #endif
+          vec3 R1 = cross( sY, normal ); vec3 R2 = cross( normal, sX );
+          float fD = dot( sX, R1 ) * faceDirection;
+          normal = normalize( abs( fD ) * normal - sign( fD ) * ( dFdx( aH ) * R1 + dFdy( aH ) * R2 ) );
+          // (2) Photographic micro relief: screen-space bump at low gain, faded out with distance
+          //     (the photo's full-frequency content must never be treated as metres of relief).
+          #ifdef ROCK_LANDMARK
+            float tH = dot( rd * 0.6 + c2 * 0.4, vec3( 0.333 ) ) * 0.42 * ( 1.0 - smoothstep( 20.0, 110.0, rView ) );
+          #else
+            float tH = dot( rd * 0.6 + c2 * 0.4, vec3( 0.333 ) ) * 0.5 * ( 1.0 - smoothstep( 10.0, 60.0, rView ) );
+          #endif
+          vec3 nX = normalize( sX ); vec3 nY = normalize( sY );
+          R1 = cross( nY, normal ); R2 = cross( normal, nX );
+          fD = dot( nX, R1 ) * faceDirection;
+          normal = normalize( abs( fD ) * normal - sign( fD ) * ( dFdx( tH ) * R1 + dFdy( tH ) * R2 ) );
+        }`
       );
   };
-  mat.customProgramCacheKey = () => "rock-v2";
+  mat.customProgramCacheKey = () => (landmark ? "rock-v3-landmark" : "rock-v3");
   return mat;
 }
