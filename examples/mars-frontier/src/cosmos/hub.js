@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { DESTINATIONS, SCI, byId } from "./destinations.js";
 import { Panel, grid, textLabel } from "../xr/panel.js";
-import { starSky, sun, earth, planet, planetTex, distanceForAngle } from "./common.js";
+import { starSky, sun, earth, planet, planetTex, distanceForAngle, interiorEnvironment } from "./common.js";
 import { surface } from "../scene/surfaces.js";
 
 /**
@@ -30,6 +30,8 @@ export async function build(ctx) {
   const { tier, xr, renderer } = ctx;
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
+  scene.environment = interiorEnvironment(renderer);
+  scene.environmentIntensity = 0.32;
   const interactables = [];
 
   // ── Sky: stars, Sun, the Earth far below, the Moon ──
@@ -40,14 +42,15 @@ export async function build(ctx) {
   scene.add(sol.group);
   const earthR = 6371;
   const e = earth(earthR, { tier, sunDir });
-  // High orbit (~20,000 km): the Earth spans about 30° below the deck.
+  // High orbit (~20,000 km): the Earth spans about 30°, low beyond the windows to the right of the orrery.
   const eDist = distanceForAngle(earthR, 30);
-  e.group.position.set(eDist * 0.35, -eDist * 0.78, eDist * 0.52);
+  const eDir = new THREE.Vector3(0.82, -0.2, -0.54).normalize();
+  e.group.position.copy(eDir).multiplyScalar(eDist);
   e.group.rotation.set(0.4, 2.2, 0.1);
   scene.add(e.group);
   const moonBody = planet(1737, { tex: "moon", tier, segments: 64 });
   const mDist = distanceForAngle(1737, 1.2);
-  moonBody.group.position.copy(new THREE.Vector3(0.8, 0.12, -0.55).normalize().multiplyScalar(mDist));
+  moonBody.group.position.copy(new THREE.Vector3(-0.75, 0.16, -0.64).normalize().multiplyScalar(mDist));
   scene.add(moonBody.group);
 
   // ── Lighting ──
@@ -56,7 +59,7 @@ export async function build(ctx) {
   scene.add(sunLight);
   scene.add(new THREE.HemisphereLight(0x9ab8ff, 0x1a2230, 0.35));
   const earthshine = new THREE.DirectionalLight(0x6f9fff, 0.5);
-  earthshine.position.set(0.35, -0.78, 0.52);
+  earthshine.position.copy(eDir);
   scene.add(earthshine);
   const deckLight = new THREE.PointLight(0x9fd8ff, 6, 14, 1.6);
   deckLight.position.set(0, 3.2, 0);
@@ -67,7 +70,7 @@ export async function build(ctx) {
 
   // ── Materials ──
   const clean = { dustTop: 0, dustBase: 0, grime: 0.12 };
-  const deckMat = surface({ kind: "panel", color: 0x2c3138, roughness: 0.5, metalness: 0.55, scale: 0.6, ...clean });
+  const deckMat = surface({ kind: "panel", color: 0x30353c, roughness: 0.55, metalness: 0.45, scale: 0.22, mix: 0.55, bump: 0.12, ...clean });
   const trimMat = surface({ kind: "brushed", color: 0x8a939c, roughness: 0.32, metalness: 0.9, scale: 1.2, ...clean });
   const darkMat = surface({ kind: "panel", color: 0x15181c, roughness: 0.6, metalness: 0.4, scale: 0.8, ...clean });
   const whiteMat = surface({ kind: "composite", color: 0xd9dcdf, roughness: 0.55, metalness: 0.05, scale: 0.5, ...clean });
@@ -130,6 +133,9 @@ export async function build(ctx) {
   const ceilingLight = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.04, 8, 80).rotateX(Math.PI / 2), glowCyan);
   ceilingLight.position.y = 5.2;
   deck.add(ceilingLight);
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(DECK_R * 1.6, 64, 16, 0, Math.PI * 2, 0, 0.62), glass);
+  dome.position.y = 4.2 - DECK_R * 1.6 * Math.cos(0.62);
+  deck.add(dome);
   const hubCap = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.4, 48), whiteMat);
   hubCap.position.y = 5.35;
   deck.add(hubCap);

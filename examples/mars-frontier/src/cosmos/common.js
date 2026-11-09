@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { mulberry32 } from "../scene/noise.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 /**
  * Shared building blocks for every destination: texture loading by graphics tier, the star sky,
@@ -340,4 +341,18 @@ export function fadeByDistance(obj, cam, near, far) {
 /** A simple world adapter for a flat deck / platform (stations, cockpits, observation decks). */
 export function flatGround(y, shape) {
   return (x, z) => (shape(x, z) ? y : null);
+}
+
+/**
+ * Image-based lighting for interiors (stations, cockpits, habitats): a soft studio-like room
+ * prefiltered once and shared. Metals and glass need something to reflect or they render black.
+ */
+let envCache = null;
+export function interiorEnvironment(renderer) {
+  if (envCache) return envCache;
+  const pm = new THREE.PMREMGenerator(renderer);
+  envCache = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+  envCache.userData.shared = true;
+  pm.dispose();
+  return envCache;
 }
