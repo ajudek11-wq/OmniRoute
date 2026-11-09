@@ -2,7 +2,7 @@
   "name": "mars-frontier",
   "private": true,
   "version": "1.0.0",
-  "description": "MARS: FRONTIER \u2014 an interactive, mobile-first Three.js Mars settlement experience.",
+  "description": "MARS: FRONTIER — an interactive, mobile-first Three.js Mars settlement experience.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,6 +16,7 @@
     "three": "0.187.0"
   },
   "devDependencies": {
+    "iwer": "2.6.0",
     "vite": "8.3.6"
   },
   "engines": {

@@ -38,6 +38,8 @@
           <button class="clock-speed" id="btn-speed" aria-label="Change time speed">10m/s</button>
         </div>
         <div class="top-actions">
+          <button class="icon-btn glass vr-pill" id="btn-vr" aria-label="Enter VR">VR</button>
+          <button class="icon-btn glass" id="btn-universe" aria-label="Star map: explore the universe"></button>
           <button class="icon-btn glass" id="btn-cine" aria-label="Cinematic mode"></button>
           <button class="icon-btn glass" id="btn-settings" aria-label="Settings"></button>
         </div>
@@ -94,6 +96,18 @@
 
       <nav class="dock" id="dock" aria-label="Main"></nav>
 
+      <div class="cosmos-ui" id="cosmos-ui">
+        <div class="cos-cross" aria-hidden="true"></div>
+        <div class="cos-bar glass">
+          <span class="cos-title" id="cos-title"></span>
+          <button class="cos-btn" id="cos-hub">Star map</button>
+          <button class="cos-btn" id="cos-mars">Mars</button>
+          <button class="cos-btn" id="cos-menu">Menu</button>
+          <button class="cos-btn primary" id="cos-vr">Enter VR</button>
+        </div>
+        <div class="cos-hint">Click to look around · WASD move · click to select · E grab · Tab menu · Esc frees the mouse</div>
+      </div>
+
       <div class="intro-title" id="intro-title" aria-hidden="false">
         <div class="intro-eyebrow">Frontier Base · Arcadia Planitia</div>
         <div class="intro-name">MARS<span>:</span> FRONTIER</div>
@@ -110,12 +124,15 @@
           <div class="loading-stage" id="loading-stage">Initialising</div>
           <div class="loading-actions" id="loading-actions" hidden>
             <button class="btn primary" id="btn-enter">Enter settlement</button>
+            <button class="btn" id="btn-enter-vr">Enter VR</button>
+            <button class="btn" id="btn-enter-universe">Explore the universe</button>
             <label class="check">
               <input type="checkbox" id="chk-sound" />
               <span>Ambient sound</span>
             </label>
           </div>
           <p class="loading-note" id="loading-note"></p>
+          <p class="loading-note" id="vr-note"></p>
         </div>
       </div>
     </div>

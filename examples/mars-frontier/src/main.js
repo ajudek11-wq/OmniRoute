@@ -42,6 +42,10 @@ import { MissionManager, MISSIONS } from "./game/missions.js";
 import { STRUCTURE_INFO } from "./data/structures.js";
 import { SURVEY_SITES, ROVER_HOME, SOLAR_SERVICE_POINT, STRUCTURE_POS } from "./data/layout.js";
 import { HUD } from "./ui/hud.js";
+import { XRSystem } from "./xr/xrSystem.js";
+import { VR_TIERS, VR_TIER_ORDER, gpuName, recommendVrTier, VrGovernor } from "./xr/vrQuality.js";
+import { Cosmos } from "./cosmos/director.js";
+import { createMarsVR } from "./cosmos/marsVR.js";
 import { Sheet } from "./ui/sheet.js";
 import {
   structureView,
@@ -201,6 +205,7 @@ class App {
       this.initWalk();
       this.initInput(canvas);
       this.applyVisualConfig();
+      this.initVR(canvas);
 
       await progress(0.94, "Compiling shaders");
       scene.traverse((o) => {
@@ -1614,6 +1619,14 @@ class App {
     this.frame++;
     const t = now / 1000;
 
+    // Another destination is live: the universe director simulates and renders it.
+    if (this.cosmos?.active) {
+      this.cosmos.tick(dt, t);
+      if (this.xr.presenting) this.vrGov.sample(dt);
+      return;
+    }
+    const vr = !!this.xr?.presenting;
+
     this.updateSim(dt);
     if (this.driving) this.updateDrive(dt);
     this.rover.update(dt, t);
@@ -1629,9 +1642,10 @@ class App {
     const gd = Math.hypot(this.rover.pos.x - STRUCTURE_POS.garage.x, this.rover.pos.z - (STRUCTURE_POS.garage.z + 8));
     garage.setOpen(gd < 18);
 
-    if (!this.driving) this.rig.update(dt);
+    if (!this.driving && !vr) this.rig.update(dt);
     if (this.cinematic.active) this.cinematic.update(dt, this.world.camera);
-    const focus = this.driving ? this.rover.pos : this.walker.active ? this.world.camera.position : this.rig.controls.target;
+    if (vr) this.marsVR.update(dt);
+    const focus = vr ? this.world.camera.position : this.driving ? this.rover.pos : this.walker.active ? this.world.camera.position : this.rig.controls.target;
     const env = this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus, time: t, dt, frame: this.frame });
     this.settlement.update(t, env, this.sim);
     this.ambient?.update(t, dt, env, this.sim, this.world.camera.position);
@@ -1662,7 +1676,7 @@ class App {
     this.audio.update(Math.max(0, 1 - camDist / 140), env.storm, roverNear * Math.min(1, roverV / 3 + steerFx * 0.4), roverV, steerFx);
     this.rover.dust.setView(0.35 + Math.max(0, this.sunDir.y) * 1.4, this.renderer.domElement.height);
 
-    if (this.started) this.updateLabels();
+    if (this.started && !vr) this.updateLabels();
 
     // Throttled UI work
     this.uiTimer = (this.uiTimer ?? 0) - dt;
@@ -1699,8 +1713,168 @@ class App {
       this.save();
     }
 
-    this.governor.sample(dt);
-    this.renderer.render(this.world.scene, this.world.camera);
+    if (vr) this.vrGov.sample(dt);
+    else this.governor.sample(dt);
+    this.renderer.render(this.world.scene, vr ? this.xr.camera : this.world.camera);
+  }
+
+  // ── VR + universe ────────────────────────────────────────
+  initVR(canvas) {
+    this.gpu = gpuName(this.renderer);
+    this.vrRec = recommendVrTier(this.gpu);
+    this.vrTier = VR_TIERS[this.settings.vrTier] ? this.settings.vrTier : this.vrRec.tier;
+    this.xr = new XRSystem({
+      renderer: this.renderer,
+      comfort: this.settings.comfort ?? {},
+      sound: this.audio,
+      onMenu: (id) => this.vrMenu(id),
+      onSessionChange: (on) => this.vrSession(on),
+    });
+    this.xr.targetHz = VR_TIERS[this.vrTier].hz;
+    this.xr.qualityLabel = VR_TIERS[this.vrTier].name;
+    this.xr.bindCanvas(canvas);
+    this.cosmos = new Cosmos(this);
+    this.cosmos.onChange = () => this.updateCosmosUI();
+    this.marsVR = createMarsVR(this);
+    this.vrGov = new VrGovernor((lvl) => this.vrStep(lvl));
+    const $ = (id) => document.getElementById(id);
+    if ($("btn-universe")) $("btn-universe").innerHTML = ICONS.orbit;
+    for (const id of ["btn-vr", "btn-enter-vr", "cos-vr"]) $(id)?.addEventListener("click", () => this.startVR());
+    for (const id of ["btn-universe", "btn-enter-universe"]) $(id)?.addEventListener("click", () => this.openUniverse());
+    $("cos-mars")?.addEventListener("click", () => this.cosmos.go("mars"));
+    $("cos-hub")?.addEventListener("click", () => this.cosmos.go("hub"));
+    $("cos-menu")?.addEventListener("click", () => this.xr.toggleMenu());
+    XRSystem.supported().then((ok) => {
+      this.vrSupported = ok;
+      for (const id of ["btn-vr", "btn-enter-vr", "cos-vr"]) {
+        const b = $(id);
+        if (!b) continue;
+        b.disabled = !ok;
+        b.title = ok ? "Enter VR (SteamVR / OpenXR headset)" : "No VR headset runtime found. Use Chrome or Edge on Windows with SteamVR running (see README).";
+      }
+      const note = $("vr-note");
+      if (note) note.textContent = ok ? `VR ready · recommended graphics: ${VR_TIERS[this.vrRec.tier].name} (${this.vrRec.reason})` : "VR: start SteamVR, then open this page in Chrome or Edge on the same PC.";
+    });
+  }
+
+  async startVR() {
+    if (!this.vrSupported) {
+      this.hud.toast("VR not available", "Start SteamVR with the PS VR2 connected, then use Chrome or Edge on this PC (http://localhost).", "warn", 7000);
+      return;
+    }
+    if (document.getElementById("loading")) this.enter();
+    try {
+      const T = VR_TIERS[this.vrTier];
+      await this.xr.enter({ framebufferScale: T.framebufferScale, foveation: T.foveation });
+    } catch (err) {
+      console.error(err);
+      this.hud.toast("Could not start VR", String(err?.message ?? err), "warn", 6000);
+    }
+  }
+
+  openUniverse() {
+    if (document.getElementById("loading")) this.enter();
+    if (this.introActive) this.endIntro(true);
+    this.cosmos.go("hub");
+  }
+
+  vrMenu(id) {
+    if (id === "hub") this.cosmos.go("hub");
+    else if (id === "archive") this.cosmos.toggleArchive();
+    else if (id === "sound") this.setSound(!this.settings.sound);
+    else if (id === "quality") this.cycleVrTier();
+    this.settings.comfort = { ...this.xr.comfort };
+    this.saveSettings();
+  }
+
+  cycleVrTier() {
+    const i = VR_TIER_ORDER.indexOf(this.vrTier);
+    this.vrTier = VR_TIER_ORDER[(i + 1) % VR_TIER_ORDER.length];
+    this.settings.vrTier = this.vrTier;
+    // The scene detail tier is fixed at load; the new resolution applies on the next VR session.
+    this.settings.quality = VR_TIERS[this.vrTier].scene;
+    this.saveSettings();
+    this.xr.qualityLabel = VR_TIERS[this.vrTier].name;
+    this.xr.targetHz = VR_TIERS[this.vrTier].hz;
+    this.xr.refreshMenu();
+    this.cosmos.world?.refresh?.();
+    this.cosmos.toast(`Graphics: ${VR_TIERS[this.vrTier].name}`, "Resolution applies next time you enter VR; scene detail after a reload.");
+  }
+
+  vrStep(level) {
+    if (level === 1) this.renderer.xr.setFoveation(1);
+    else this.degrade(level - 1);
+  }
+
+  vrSession(on) {
+    const el = document.getElementById("app");
+    el.classList.toggle("xr", on);
+    if (on) {
+      if (this.introActive) this.endIntro(true);
+      this.vrGov.reset(VR_TIERS[this.vrTier].hz);
+      if (!this.cosmos.active) {
+        let spot = { x: WALK_START.x, z: WALK_START.z, yaw: Math.atan2(WALK_START.x, WALK_START.z) };
+        if (this.cinematic.active) this.toggleCinematic(false);
+        if (this.driving) this.finishDrive("orbit");
+        if (this.walker.active) {
+          spot = { ...this.walker.state, yaw: this.walker.state.yaw + Math.PI };
+          this.teardownWalk();
+        }
+        this.enterMarsVR(spot);
+      }
+    } else if (!this.cosmos.active) {
+      this.marsVR.hide();
+      this.rig.controls.enabled = true;
+      this.setMode("orbit");
+    }
+  }
+
+  enterMarsVR(spot) {
+    const cam = this.xr.camera;
+    cam.near = 0.1;
+    cam.far = this.world.camera.far;
+    cam.updateProjectionMatrix();
+    this.rig.controls.enabled = false;
+    this.marsVR.place(spot.x, spot.z, spot.yaw ?? 0);
+  }
+
+  /** Called by the director when a non-Mars destination becomes live. */
+  enterCosmos(world) {
+    const el = document.getElementById("app");
+    if (this.cinematic.active) this.toggleCinematic(false);
+    if (this.driving) this.finishDrive("orbit");
+    if (this.walker.active) this.teardownWalk();
+    this.sheet?.close();
+    this.marsVR.hide();
+    el.classList.add("cosmos");
+    el.classList.remove("walking", "driving", "menu-open");
+    this.xr.desktopActive = true;
+    this.xr.menuTitle = world.title ?? "Menu";
+    this.xr.refreshMenu();
+    this.updateCosmosUI();
+  }
+
+  /** Called by the director when returning to Mars (after a landing or from the menu). */
+  enterMarsFromCosmos(opts = {}) {
+    const el = document.getElementById("app");
+    el.classList.remove("cosmos");
+    this.xr.desktopActive = false;
+    document.exitPointerLock?.();
+    this.xr.menuTitle = "Mars · Frontier Base";
+    const pad = STRUCTURE_POS.landing;
+    const spot = opts.landed ? { x: pad.x + 14, z: pad.z - 10, yaw: -2.3 } : { x: WALK_START.x, z: WALK_START.z, yaw: Math.atan2(WALK_START.x, WALK_START.z) };
+    this.lastTime = performance.now();
+    if (this.xr.presenting) this.enterMarsVR(spot);
+    else {
+      this.rig.controls.enabled = true;
+      this.enterWalk({ x: spot.x, z: spot.z, yaw: spot.yaw + Math.PI });
+    }
+  }
+
+  updateCosmosUI() {
+    const w = this.cosmos?.world;
+    const t = document.getElementById("cos-title");
+    if (t) t.textContent = w?.title ?? "";
   }
 }
 
@@ -1711,7 +1885,18 @@ function updateSliderFill(el) {
 
 const app = new App();
 window.__frontier = app;
-app.boot();
+// Test-only: ?xremu=1 installs an emulated WebXR headset (Meta IWER) so automated checks can drive real
+// XR sessions, controller poses and buttons without hardware. Never loaded otherwise.
+if (new URLSearchParams(location.search).has("xremu")) {
+  import("iwer")
+    .then(({ XRDevice, metaQuest3 }) => {
+      const dev = new XRDevice(metaQuest3);
+      dev.installRuntime({ forceInstall: true });
+      dev.position.set(0, 1.7, 0);
+      window.__xrdev = dev;
+    })
+    .finally(() => app.boot());
+} else app.boot();
 
 if (import.meta.env.PROD && "serviceWorker" in navigator && window.isSecureContext) {
   window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
