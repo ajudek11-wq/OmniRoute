@@ -1,0 +1,27 @@
+{
+  "name": "mars-frontier",
+  "private": true,
+  "version": "1.0.0",
+  "description": "MARS: FRONTIER \u2014 a Three.js Mars settlement and WebXR space-exploration experience (PS VR2 via SteamVR on PC, desktop and mobile).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "phone": "node scripts/serve-lan.mjs",
+    "test": "node --test \"tests/*.test.js\"",
+    "smoke": "node scripts/smoke.mjs",
+    "vr": "node scripts/serve-vr.mjs",
+    "qc:vr": "node scripts/vr-qc.mjs"
+  },
+  "dependencies": {
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "iwer": "2.6.0",
+    "vite": "8.3.6"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}
