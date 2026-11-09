@@ -130,7 +130,7 @@ export class HUD {
     if (!text) el.querySelector("span").remove();
     el.addEventListener("click", () => dismiss());
     this.toastsEl.prepend(el);
-    while (this.toastsEl.children.length > 3) this.toastsEl.lastChild.remove();
+    while (this.toastsEl.children.length > (document.getElementById("app").classList.contains("walking") ? 2 : 3)) this.toastsEl.lastChild.remove();
     const dismiss = () => {
       el.classList.add("out");
       setTimeout(() => el.remove(), 400);

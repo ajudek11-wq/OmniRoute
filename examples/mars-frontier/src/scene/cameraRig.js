@@ -10,6 +10,7 @@ export const CAMERA_MODES = {
   rover: { label: "Rover", target: null, radius: 15, phi: 1.2, theta: null, min: 5, max: 80, maxPolar: 1.53 },
   roverInspect: { label: "Inspect", hidden: true, target: null, radius: 7.5, phi: 1.12, theta: null, min: 3.2, max: 22, maxPolar: 1.55 },
   mastcam: { label: "Mastcam", hidden: true },
+  walk: { label: "Walk", walk: true },
 };
 
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -162,7 +163,7 @@ export class CameraRig {
   }
 
   update(dt) {
-    if (this.cinematic) return;
+    if (this.cinematic || this.mode === "walk") return;
     const c = this.controls;
     if (this.mode === "mastcam") {
       this.updateMastcam(dt);

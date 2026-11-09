@@ -232,7 +232,9 @@ function buildHabitat(M, quality) {
   ringAround(g, "z", 1.85, 0.16, M.metal, 0, 2.0, AZ - 3.6);
   ringAround(g, "z", 1.85, 0.16, M.metal, 0, 2.0, AZ + 2.3);
   cyl(g, 1.95, 1.95, 0.35, 24, M.hullDark, 0, 2.0, AZ + 2.55, { rx: Math.PI / 2 });
-  box(g, 1.25, 1.85, 0.14, M.metalDark, 0, 1.75, AZ + 2.76);
+  const hatch = box(g, 1.25, 1.85, 0.14, M.metalDark, 0, 1.75, AZ + 2.76);
+  hatch.userData.dynamic = true;
+  let hatchOpen = 0;
   ringAround(g, "z", 0.82, 0.07, M.metal, 0, 1.75, AZ + 2.8);
   box(g, 0.9, 0.12, 0.1, M.hazard, 0, 2.85, AZ + 2.8, { cast: false });
   // Suitport bulkhead on the airlock flank.
@@ -277,10 +279,14 @@ function buildHabitat(M, quality) {
     radius: 15,
     focus: { distance: 40, height: 5 },
     footprint: { w: 30, d: 30, round: true },
+    setHatch(open) {
+      hatchOpen = open ? 1 : 0;
+    },
     update(t, env) {
       M.window.emissiveIntensity = 0.2 + env.night * 2.4;
       beacon.visible = Math.sin(t * 2.4) > 0.6;
       airlockLight.material.color.set(Math.sin(t * 0.25) > 0.85 ? "#ff5a3c" : "#5ce08a");
+      hatch.position.x += ((hatchOpen ? 1.4 : 0) - hatch.position.x) * 0.08;
     },
   };
 }

@@ -581,7 +581,7 @@ export function terrainMaterial(sets, { low = false } = {}) {
         "#include <normal_fragment_maps>",
         /* glsl */ `#include <normal_fragment_maps>
         {
-          vec2 nt = ( tNR.rg * 2.0 - 1.0 ) * ( 1.0 - tFar ) * 2.1;
+          vec2 nt = ( tNR.rg * 2.0 - 1.0 ) * ( 1.0 - tFar ) * mix( 2.1, 0.9, strW );
           vec3 nW = tN;
           // Top projection perturbs along world X/Z; side strata perturb along the wall plane.
           vec3 topP = vec3( nt.x, 0.0, nt.y );
@@ -607,7 +607,11 @@ export function rockMaterial(sets) {
         "#include <begin_vertex>",
         `#include <begin_vertex>
         vRP = position * 2.2; vRN = normal;
-        vRUp = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * objectNormal ).y;`
+        #ifdef USE_INSTANCING
+          vRUp = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * objectNormal ).y;
+        #else
+          vRUp = normalize( mat3( modelMatrix ) * objectNormal ).y;
+        #endif`
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(

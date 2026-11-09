@@ -8,6 +8,15 @@ import { Rover, ROVER_PARTS } from "./scene/rover.js";
 import { CameraRig, CAMERA_MODES } from "./scene/cameraRig.js";
 import { Cinematic } from "./scene/cinematic.js";
 import { TrackTrail } from "./scene/tracks.js";
+import { Walker } from "./scene/walker.js";
+import { WalkControls } from "./walk/controls.js";
+import { WALK_START, LANDMARKS, SURVEY_SITES as SITES, STRUCTURE_POS as POS } from "./data/layout.js";
+import { SAMPLES, collect, nearestWithin } from "./game/discoveries.js";
+import { placeLandmarks, buildSamples } from "./scene/landmarks.js";
+import { canyonCut } from "./scene/terrain.js";
+import { OBSTACLES } from "./data/layout.js";
+import { wrapAngle } from "./walk/movement.js";
+import { ICONS } from "./ui/icons.js";
 import { configureSurfaces, loadGroundSets, terrainMaterial, rockMaterial, installAtmosphere } from "./scene/surfaces.js";
 import { SOL_SECONDS } from "./sim/constants.js";
 import { AudioEngine } from "./audio/audio.js";
@@ -63,6 +72,7 @@ export const LIGHT_PRESETS = [
   { id: "blue", label: "Blue hour", frac: 0.762, hint: "Sun just below the horizon · blue glow" },
   { id: "night", label: "Night", frac: 0.9, hint: "Settlement lighting, stars, Earth" },
 ];
+const STRUCTURE_NAMES = { habitat: "Crew Habitat", lab: "Science Laboratory", greenhouse: "Greenhouse", solar: "Solar Field", battery: "Energy Storage", comms: "Communications", water: "Water & ISRU Plant", garage: "Rover Garage", landing: "Landing Zone", fission: "Fission Surface Power" };
 const LABEL_HEIGHT = { habitat: 15.5, lab: 10.5, greenhouse: 8.5, solar: 7, battery: 5.5, comms: 18, water: 9, garage: 8.5, landing: 19, fission: 10 };
 
 const storage = {
@@ -106,6 +116,7 @@ class App {
       labels: true,
       reduceMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
       fps: false,
+      lookSens: 1,
       ...storage.get(SETTINGS_KEY),
     };
     this.quality = resolveQuality(this.settings.quality);
@@ -144,7 +155,9 @@ class App {
       scene.add(this.terrain);
 
       await progress(0.44, "Scattering boulders and ejecta");
-      scene.add(buildRocks(this.quality.rocks, this.quality.key === "high", rockMaterial(sets), this.quality.rockDetail));
+      const rocks = buildRocks(this.quality.rocks, this.quality.key === "high", rockMaterial(sets), this.quality.rockDetail);
+      scene.add(rocks);
+      this.rockColliders = rocks.userData.colliders ?? [];
       scene.add(buildPaths());
 
       await progress(0.6, "Constructing settlement");
@@ -155,12 +168,19 @@ class App {
       await progress(0.74, "Deploying exploration rover");
       this.rover = new Rover(this.settlement.materials);
       scene.add(this.rover.root);
+      this.landmarkColliders = placeLandmarks(sets, scene);
+      this.samples = buildSamples();
+      this.samples.group.visible = false;
+      scene.add(this.samples.group);
       this.tracks = new TrackTrail(this.quality.key === "low" ? 300 : 700);
       scene.add(this.tracks.mesh);
 
       await progress(0.84, "Bringing life support online");
       this.initState();
       this.rig = new CameraRig(camera, canvas);
+      this.walker = new Walker(camera);
+      this.walker.sens = this.settings.lookSens;
+      this.walker.setColliders([...OBSTACLES, ...this.landmarkColliders, ...this.rockColliders]);
       this.rig.reduceMotion = this.settings.reduceMotion;
       this.governor = new FrameGovernor(this.renderer, this.quality, { degrade: (stage) => this.degrade(stage) });
       this.cinematic = new Cinematic(this);
@@ -170,6 +190,7 @@ class App {
       this.sheet = new Sheet(this);
       this.buildLabels();
       this.buildSelectionRing();
+      this.initWalk();
       this.initInput(canvas);
       this.applyVisualConfig();
 
@@ -251,6 +272,8 @@ class App {
   initState() {
     const saved = storage.get(SAVE_KEY);
     this.surveyed = new Set(saved?.surveyed ?? []);
+    this.found = new Set(saved?.found ?? []);
+    this.visitedLandmarks = new Set();
     this.history = { o2: [], water: [], food: [], battery: [] };
     this.paused = false;
     this.speedIdx = saved?.speedIdx ?? 1;
@@ -288,6 +311,7 @@ class App {
       sim: serialize(this.sim),
       missions: this.missions.serialize(),
       surveyed: [...this.surveyed],
+      found: [...this.found],
       rover: { x: this.rover.pos.x, z: this.rover.pos.z, heading: this.rover.heading, odometer: this.rover.odometer, battery: this.rover.battery },
       speedIdx: this.speedIdx,
     });
@@ -316,22 +340,29 @@ class App {
     const { camera } = this.world;
     const c = this.rig.controls;
     c.target.set(0, 0, 0);
-    camera.position.set(420, 760, 620);
+    camera.position.set(-640, 300, 760);
     camera.lookAt(c.target);
     this.rig.setMode("orbit", this.rover, { duration: this.settings.reduceMotion ? 0.01 : 6 });
     this.hud.setMode("orbit");
     const title = document.getElementById("intro-title");
     title.classList.add("show");
     this.started = true;
-    setTimeout(
-      () => {
-        document.getElementById("app").classList.remove("booting");
-        title.remove();
-        const m = this.missions.current;
-        if (m) this.hud.toast(`Mission · ${m.title}`, `${m.brief} ${m.hint}`, "info", 6500);
-      },
-      this.settings.reduceMotion ? 300 : 5200
-    );
+    this.introActive = true;
+    document.getElementById("btn-skip").hidden = false;
+    this.introTimer = setTimeout(() => this.endIntro(false), this.settings.reduceMotion ? 300 : 5200);
+  }
+
+  /** Ends the title sequence; skipping it jumps straight to the orbit view. */
+  endIntro(skipped) {
+    if (!this.introActive) return;
+    this.introActive = false;
+    clearTimeout(this.introTimer);
+    document.getElementById("app").classList.remove("booting");
+    document.getElementById("intro-title")?.remove();
+    document.getElementById("btn-skip").hidden = true;
+    if (skipped) this.rig.setMode("orbit", this.rover, { duration: 0.01 });
+    const m = this.missions.current;
+    if (m) this.hud.toast(`Mission · ${m.title}`, `${m.brief} ${m.hint}`, "info", 6500);
   }
 
   // ── Labels & selection ───────────────────────────────────
@@ -381,6 +412,15 @@ class App {
 
   /** Project labels, then greedily place them by priority so none overlap the HUD or each other. */
   updateLabels() {
+    if (this.walker?.active) {
+      for (const L of this.labels) {
+        if (L.visible) {
+          L.visible = false;
+          L.el.style.visibility = "hidden";
+        }
+      }
+      return;
+    }
     const cam = this.world.camera;
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -687,6 +727,12 @@ class App {
         this.sheet.refresh();
         break;
       }
+      case "look-sens":
+        this.settings.lookSens = Number(data.value);
+        this.walker.sens = this.settings.lookSens;
+        updateSliderFill(data.el);
+        this.saveSettings();
+        break;
       case "volume":
         this.settings.volume = Number(data.value);
         this.audio.setVolume(this.settings.volume);
@@ -740,6 +786,14 @@ class App {
 
   setMode(mode) {
     if (this.cinematic?.active) this.toggleCinematic(false);
+    if (mode === "walk") {
+      this.enterWalk();
+      return;
+    }
+    if (this.walker?.active) {
+      this.exitWalk(mode);
+      return;
+    }
     this.rig.setMode(mode, this.rover);
     this.hud.setMode(mode);
     document.getElementById("app").classList.toggle("mastcam", mode === "mastcam");
@@ -749,6 +803,326 @@ class App {
       this.settings.seenDriveHint = true;
       this.saveSettings();
       this.hud.toast("Rover view", "Tap anywhere on the ground to drive there. Tap a blue beacon to plan a survey.", "info", 5000);
+    }
+  }
+
+  // ── Walking (first-person) ──────────────────────────────────
+  initWalk() {
+    const $ = (id) => document.getElementById(id);
+    this.walkCtl = new WalkControls({
+      walker: this.walker,
+      zone: $("walk-zone"),
+      joy: $("joy"),
+      knob: $("joy-knob"),
+      onTap: (x, y) => this.walkTap(x, y),
+      onInteract: () => this.interactNearest(),
+      isActive: () => this.walker.active,
+    });
+    $("btn-sprint").innerHTML = "";
+    $("btn-sprint").addEventListener("click", (e) => {
+      const on = this.walkCtl.toggleSprint();
+      e.currentTarget.classList.toggle("on", on);
+    });
+    $("btn-act").addEventListener("click", () => this.interactNearest());
+    $("btn-menu").innerHTML = ICONS.menu;
+    $("btn-menu").addEventListener("click", () => $("app").classList.toggle("menu-open"));
+    $("btn-skip").addEventListener("click", () => this.endIntro(true));
+    $("app").addEventListener("pointerdown", (e) => {
+      if (this.introActive && !e.target.closest("#btn-skip")) this.endIntro(true);
+    });
+    // Compass: four cardinal marks that slide with the view.
+    const tape = $("compass-tape");
+    this.compassMarks = [
+      ["N", Math.PI],
+      ["E", Math.PI / 2],
+      ["S", 0],
+      ["W", -Math.PI / 2],
+    ].map(([label, yaw]) => {
+      const el = document.createElement("i");
+      el.textContent = label;
+      if (label === "N") el.className = "n";
+      tape.appendChild(el);
+      return { el, yaw };
+    });
+    // Everything the player can use, in world metres. Each has a standing point and a radius.
+    this.interactables = [
+      { id: "airlock", label: "Cycle airlock", icon: ICONS.door, x: 0, z: 16.4, r: 5.5, act: () => this.actAirlock() },
+      { id: "scan", label: "Run scan", icon: ICONS.scan, x: -30, z: -11.6, r: 5.5, act: () => this.actScan() },
+      { id: "greenhouse", label: "Grow lights", icon: ICONS.plant, x: 3, z: -28.4, r: 5, act: () => this.actLights() },
+      { id: "comms", label: "Transmit", icon: ICONS.signal, x: -42, z: 29.5, r: 5, act: () => this.actTransmit() },
+      { id: "solar", label: "Clean panels", icon: ICONS.panel, x: 84, z: 6, r: 5, act: () => this.actClean() },
+      { id: "garage", label: "Recall rover", icon: ICONS.rover_, x: 36, z: 27, r: 5, act: () => this.action("rover-home") },
+      { id: "rover", label: "Drive rover", icon: ICONS.rover, dyn: true, r: 4.5, act: () => this.setMode("rover") },
+      ...SAMPLES.map((s) => ({
+        id: `sample-${s.id}`,
+        label: s.name,
+        icon: ICONS.gem,
+        x: s.x,
+        z: s.z,
+        r: 3.6,
+        sample: s.id,
+        hidden: () => this.found.has(s.id),
+        act: () => this.actSample(s.id),
+      })),
+    ];
+    // Places for the location line (name + the radius within which we say we are there).
+    this.locations = [
+      ...Object.entries(POS).map(([id, p]) => ({ name: STRUCTURE_NAMES[id] ?? id, x: p.x, z: p.z, r: 40 })),
+      ...LANDMARKS.map((L) => ({ name: L.name, x: L.x, z: L.z, r: 70 })),
+      ...SITES.map((s) => ({ name: s.name, x: s.x, z: s.z, r: 70 })),
+    ];
+    this.pulses = [];
+    this.beams = [];
+    this.stepAcc = 0;
+    this.locT = 0;
+    this.nearAct = null;
+    this.discoverShown = -1;
+  }
+
+  enterWalk() {
+    if (this.walker.active) return;
+    this.sheet.close();
+    const $ = (id) => document.getElementById(id);
+    this.rig.controls.enabled = false;
+    this.rig.mode = "walk";
+    this.walker.enter(WALK_START.x, WALK_START.z, Math.atan2(0 - WALK_START.x, 0 - WALK_START.z));
+    this.hud.setMode("walk");
+    document.getElementById("app").classList.add("walking");
+    $("walk-ui").hidden = false;
+    $("compass").hidden = false;
+    $("loc").hidden = false;
+    $("discover").hidden = false;
+    $("btn-menu").hidden = false;
+    this.discoverShown = -1;
+    this.missions.emit({ type: "walk" }, this.ctx());
+    this.hud.toast("On foot", "Drag the left side to walk, the right side to look.", "info", 4200);
+    this.audio.tap();
+  }
+
+  exitWalk(mode = "orbit") {
+    if (!this.walker.active) return;
+    const $ = (id) => document.getElementById(id);
+    // Keep the orbit pivot in front of the walker so the camera flies out from where it stands.
+    const f = this.walker.forward();
+    this.rig.controls.target.copy(this.world.camera.position).addScaledVector(f, 8);
+    this.walker.exit();
+    this.walkCtl.reset();
+    this.nearAct = null;
+    document.getElementById("app").classList.remove("walking", "menu-open");
+    $("walk-ui").hidden = true;
+    $("btn-act").hidden = true;
+    $("compass").hidden = true;
+    $("loc").hidden = true;
+    $("discover").hidden = true;
+    $("btn-menu").hidden = true;
+    $("btn-sprint").classList.remove("on");
+    this.rig.controls.enabled = true;
+    this.rig.mode = "none";
+    this.rig.setMode(mode, this.rover, { duration: 1.6 });
+    this.hud.setMode(mode);
+  }
+
+  /** Tap while walking: inspect structures, samples and sites under the finger. */
+  walkTap(cx, cy) {
+    const rc = this.raycaster;
+    const ndc = new THREE.Vector2((cx / window.innerWidth) * 2 - 1, -(cy / window.innerHeight) * 2 + 1);
+    rc.setFromCamera(ndc, this.world.camera);
+    const hit = rc.intersectObjects(this.settlement.pickables, false)[0];
+    if (hit) {
+      const pick = hit.object.userData.pick;
+      this.select(pick.kind, pick.id, { focus: false });
+    }
+  }
+
+  interactNearest() {
+    if (this.nearAct) this.nearAct.act();
+  }
+
+  pulseAt(x, z, color = "#ffb35c") {
+    const g = new THREE.RingGeometry(0.55, 0.7, 40);
+    g.rotateX(-Math.PI / 2);
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+    m.position.set(x, heightAt(x, z) + 0.2, z);
+    m.renderOrder = 4;
+    this.world.scene.add(m);
+    this.pulses.push({ m, t: 0 });
+  }
+
+  /** A short vertical light column, used for scans and transmissions. */
+  flashBeam(x, z, height, color = "#8fd8ff") {
+    const g = new THREE.CylinderGeometry(0.3, 0.3, height, 10, 1, true);
+    g.translate(0, height / 2, 0);
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.0, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }));
+    m.position.set(x, heightAt(x, z), z);
+    this.world.scene.add(m);
+    this.beams.push({ m, t: 0 });
+  }
+
+  actAirlock() {
+    this.settlement.structures.habitat.setHatch(true);
+    setTimeout(() => this.settlement.structures.habitat.setHatch(false), 4200);
+    this.pulseAt(0, 16.4);
+    this.audio.chime();
+    this.hud.toast("Airlock", "Cycling. Hatch open briefly.", "info", 3200);
+  }
+
+  actScan() {
+    this.pulseAt(-30, -11.6, "#8fd8ff");
+    this.flashBeam(-30, -11.6, 4, "#8fd8ff");
+    this.audio.tap();
+  }
+
+  actLights() {
+    setSystem(this.sim, "greenhouseLights", !this.sim.systems.greenhouseLights);
+    const on = this.sim.systems.greenhouseLights;
+    this.pulseAt(3, -28.4, on ? "#ff7fd8" : "#7a5a6a");
+    this.hud.toast(on ? "Grow lights on" : "Grow lights off", "", on ? "success" : "info", 2200);
+    this.audio.tap();
+  }
+
+  actTransmit() {
+    this.action("send-report");
+    this.flashBeam(-42, 36, 40, "#8fd8ff");
+    this.pulseAt(-42, 29.5, "#8fd8ff");
+  }
+
+  actClean() {
+    if (this.roverBusy()) {
+      this.hud.toast("Rover busy", "Wait for the current task.", "warn", 2200);
+      return;
+    }
+    this.dispatchClean();
+  }
+
+  actSample(id) {
+    const { found, added } = collect(this.found, id);
+    if (!added) return;
+    this.found = found;
+    const sample = SAMPLES.find((x) => x.id === id);
+    this.pulseAt(sample.x, sample.z, "#ffd27a");
+    this.flashBeam(sample.x, sample.z, 14, "#ffd27a");
+    this.audio.chime();
+    this.hud.toast(`Discovery · ${sample.name}`, sample.hint, "success", 5200);
+    this.missions.emit({ type: "collect", id, count: this.found.size }, this.ctx());
+    this.save();
+  }
+
+  /** Per-frame walking logic: interaction targets, landmarks, footsteps, HUD readouts. */
+  updateWalk(dt, t) {
+    const cam = this.world.camera;
+    // Audio listener follows whatever the camera sees, in every mode.
+    const dir = cam.getWorldDirection(this._dir ?? (this._dir = new THREE.Vector3()));
+    this.audio.setListener(cam.position.x, cam.position.y, cam.position.z, Math.atan2(dir.x, dir.z));
+    this.audio.setSources(this.rover.pos.x, this.rover.pos.y, this.rover.pos.z);
+    // Samples and beacons only exist for the walker; they would clutter the orbit view.
+    this.samples.group.visible = this.walker.active;
+    this.samples.update(t, this.found);
+    // Pulses and beams fade out.
+    for (const p of this.pulses) {
+      p.t += dt;
+      const k = p.t / 0.9;
+      p.m.scale.setScalar(1 + k * 6);
+      p.m.material.opacity = Math.max(0, 0.9 * (1 - k));
+    }
+    this.pulses = this.pulses.filter((p) => {
+      if (p.t < 0.9) return true;
+      this.world.scene.remove(p.m);
+      p.m.geometry.dispose();
+      p.m.material.dispose();
+      return false;
+    });
+    for (const b of this.beams) {
+      b.t += dt;
+      const k = b.t / 1.3;
+      b.m.material.opacity = Math.max(0, 0.6 * Math.sin(Math.min(1, k) * Math.PI) * (1 - k * 0.3));
+    }
+    this.beams = this.beams.filter((b) => {
+      if (b.t < 1.3) return true;
+      this.world.scene.remove(b.m);
+      b.m.geometry.dispose();
+      b.m.material.dispose();
+      return false;
+    });
+    if (!this.walker.active) return;
+    this.walker.update(dt);
+
+    const st = this.walker.state;
+    // Footsteps every ~1.25 m on foot, a little louder when sprinting.
+    if (st.moving) {
+      this.stepAcc += st.travelled - (this._lastTravelled ?? 0);
+      if (this.stepAcc > 1.25) {
+        this.stepAcc = 0;
+        this.audio.step(st.speed > 3.5 ? 0.075 : 0.05);
+      }
+    }
+    this._lastTravelled = st.travelled;
+
+    // Nearest interaction in reach.
+    let best = null;
+    let bd = Infinity;
+    for (const it of this.interactables) {
+      if (it.hidden?.()) continue;
+      const px = it.dyn ? this.rover.pos.x : it.x;
+      const pz = it.dyn ? this.rover.pos.z : it.z;
+      const d = Math.hypot(st.x - px, st.z - pz);
+      if (d < it.r && d < bd) {
+        bd = d;
+        best = it;
+      }
+    }
+    if (best !== this.nearAct) {
+      this.nearAct = best;
+      const btn = document.getElementById("btn-act");
+      btn.hidden = !best;
+      if (best) {
+        document.getElementById("act-label").textContent = best.label;
+        document.getElementById("act-icon").innerHTML = best.icon;
+      }
+    }
+
+    // Landmarks reached on foot.
+    for (const L of LANDMARKS) {
+      if (this.visitedLandmarks.has(L.id)) continue;
+      if (Math.hypot(st.x - L.x, st.z - L.z) < 45) {
+        this.visitedLandmarks.add(L.id);
+        this.missions.emit({ type: "visit", id: L.id }, this.ctx());
+        this.audio.chime();
+      }
+    }
+
+    this.locT -= dt;
+    if (this.locT <= 0) {
+      this.locT = 0.4;
+      let name = "Arcadia Planitia";
+      let bestLoc = null;
+      let bl = Infinity;
+      for (const l of this.locations) {
+        const d = Math.hypot(st.x - l.x, st.z - l.z);
+        if (d < l.r && d < bl) {
+          bl = d;
+          bestLoc = l;
+        }
+      }
+      if (bestLoc) name = bestLoc.name;
+      else if (canyonCut(st.x, st.z) > 4) name = "Canyon floor";
+      document.getElementById("loc").textContent = name;
+    }
+
+    // North is −z, so its yaw is π. Turning right lowers yaw and slides the marks left.
+    for (const m of this.compassMarks) {
+      const rel = wrapAngle(m.yaw - st.yaw);
+      m.el.style.display = Math.abs(rel) > 1.6 ? "none" : "";
+      m.el.style.left = `calc(50% + ${(-rel * 150).toFixed(1)}px)`;
+    }
+
+    const shown = this.found.size;
+    if (shown !== this.discoverShown) {
+      this.discoverShown = shown;
+      document.getElementById("discover-n").textContent = `${shown}/${SAMPLES.length}`;
+      const el = document.getElementById("discover");
+      el.classList.remove("pop");
+      void el.offsetWidth;
+      el.classList.add("pop");
     }
   }
 
@@ -954,6 +1328,7 @@ class App {
     this.updateSim(dt);
     this.rover.update(dt, t);
     this.tracks.update(this.rover.pos, this.rover.heading, this.rover.moving);
+    this.updateWalk(dt, t);
     this.updateRoverTask(dt);
     if (this.reportCooldown > 0) this.reportCooldown -= dt;
 
@@ -963,7 +1338,7 @@ class App {
 
     this.rig.update(dt);
     if (this.cinematic.active) this.cinematic.update(dt, this.world.camera);
-    const focus = this.rig.controls.target;
+    const focus = this.walker.active ? this.world.camera.position : this.rig.controls.target;
     const env = this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus, time: t, dt, frame: this.frame });
     this.settlement.update(t, env, this.sim);
 

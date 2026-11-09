@@ -104,3 +104,25 @@ export const OBSTACLES = [
   { x: -15, z: 4, r: 3 },
   { x: 3, z: -19, r: 3 },
 ];
+
+/** Kasei-style canyon system south-west of the base: a carved valley with walls of layered rock. */
+export const CANYON = {
+  path: [
+    [-360, 120],
+    [-430, 260],
+    [-470, 380],
+    [-520, 520],
+    [-560, 640],
+  ],
+  halfWidth: 46, // m from centreline to the rim
+  depth: 52, // m below the surrounding plain at the deepest point
+};
+
+/** Tall landmarks visible across the plain (positions are world metres). */
+export const LANDMARKS = [
+  { id: "spire", name: "Glass Spire", x: 560, z: -420, kind: "spire" },
+  { id: "arch", name: "Ridge Arch", x: -640, z: -420, kind: "arch" },
+];
+
+/** Where the first-person walker appears when entering on foot (near the garage). */
+export const WALK_START = { x: 24, z: 30 };

@@ -66,7 +66,20 @@ export class AudioEngine {
     const humFilter = ctx.createBiquadFilter();
     humFilter.type = "lowpass";
     humFilter.frequency.value = 400;
-    this.humGain.connect(humFilter).connect(this.master);
+    // Spatial: the habitat hum and rover motor come from where they are in the world.
+    const mkPanner = () => {
+      const p = ctx.createPanner();
+      p.panningModel = "HRTF";
+      p.distanceModel = "inverse";
+      p.refDistance = 14;
+      p.maxDistance = 400;
+      p.rolloffFactor = 1.3;
+      p.connect(this.master);
+      return p;
+    };
+    this.humPanner = mkPanner();
+    this.setPanPos(this.humPanner, 0, 3, 0);
+    humFilter.connect(this.humPanner);
 
     // Rover drive motors: detuned saws through a low-pass whose cutoff and pitch follow speed.
     this.motorGain = ctx.createGain();
@@ -82,7 +95,12 @@ export class AudioEngine {
       o.start();
       return o;
     });
-    this.motorFilter.connect(this.motorGain).connect(this.master);
+    this.motorPanner = mkPanner();
+    this.motorFilter.connect(this.motorGain).connect(this.motorPanner);
+    this.motorGain.connect(this.motorPanner);
+    this.noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.25, ctx.sampleRate);
+    const nd = this.noiseBuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / nd.length, 3);
     return true;
   }
 
@@ -102,11 +120,60 @@ export class AudioEngine {
     if (this.enabled && this.ctx) this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.2);
   }
 
+  setPanPos(p, x, y, z) {
+    if (!p) return;
+    const t = this.ctx.currentTime;
+    if (p.positionX) {
+      p.positionX.setValueAtTime(x, t);
+      p.positionY.setValueAtTime(y, t);
+      p.positionZ.setValueAtTime(z, t);
+    } else p.setPosition(x, y, z);
+  }
+
+  /** Listener follows the walking camera. yaw: forward = (sin, cos) in x/z, as in the walker. */
+  setListener(x, y, z, yaw) {
+    if (!this.ctx) return;
+    const L = this.ctx.listener;
+    const t = this.ctx.currentTime;
+    const fx = Math.sin(yaw);
+    const fz = Math.cos(yaw);
+    if (L.positionX) {
+      L.positionX.setValueAtTime(x, t);
+      L.positionY.setValueAtTime(y, t);
+      L.positionZ.setValueAtTime(z, t);
+      L.forwardX.setValueAtTime(fx, t);
+      L.forwardY.setValueAtTime(0, t);
+      L.forwardZ.setValueAtTime(-fz, t);
+      L.upX.setValueAtTime(0, t);
+      L.upY.setValueAtTime(1, t);
+      L.upZ.setValueAtTime(0, t);
+    }
+  }
+
+  setSources(roverX, roverY, roverZ) {
+    this.setPanPos(this.motorPanner, roverX, roverY + 1, roverZ);
+  }
+
+  /** A soft, low footfall on regolith (thin air: no crisp clicks). */
+  step(volume = 0.05) {
+    if (!this.enabled || !this.ctx) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.8 + Math.random() * 0.3;
+    const f = this.ctx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = 420;
+    const g = this.ctx.createGain();
+    g.gain.value = volume;
+    src.connect(f).connect(g).connect(this.master);
+    src.start();
+  }
+
   /** Called every frame: proximity to the habitat, storm intensity, rover speed × proximity. */
   update(habitatProximity, storm, rover = 0, roverSpeed = 0) {
     if (!this.enabled || !this.ctx) return;
     const t = this.ctx.currentTime;
-    this.humGain.gain.setTargetAtTime(habitatProximity * 0.9, t, 0.5);
+    this.humGain.gain.setTargetAtTime(habitatProximity * 1.6, t, 0.5);
     this.windGain.gain.setTargetAtTime(0.35 + storm * 0.9, t, 1.2);
     // Mars' thin CO₂ atmosphere carries sound poorly: keep the motors faint and muffled.
     this.motorGain.gain.setTargetAtTime(rover * 0.05, t, 0.3);

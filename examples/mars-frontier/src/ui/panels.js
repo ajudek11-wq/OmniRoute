@@ -550,6 +550,7 @@ export function settingsView(app) {
         ${seg("quality", [["auto", "Automatic"], ["low", "Low"], ["balanced", "Balanced"], ["high", "High"]], st.quality === "medium" ? "balanced" : st.quality)}
         <p class="fine" style="margin-top:6px">Automatic measures real frame rate and steps effects down if needed. Changing quality reloads the scene; your settlement is saved.</p></div>
       <button class="toggle" role="switch" data-action="setting-toggle" data-name="sound" data-bind="sw-sound"><div><div class="t-label">Ambient sound</div><div class="t-hint">Wind, habitat hum and interface cues</div></div><span class="switch"></span></button>
+      <div class="setting"><label>Look sensitivity · walking</label><input type="range" min="0.5" max="2" step="0.1" value="${st.lookSens ?? 1}" data-input="look-sens" aria-label="Look sensitivity"/></div>
       <div class="setting"><label>Volume</label><input type="range" min="0" max="1" step="0.05" value="${st.volume}" data-input="volume" aria-label="Volume"/></div>
       <button class="toggle" role="switch" data-action="setting-toggle" data-name="labels" data-bind="sw-labels"><div><div class="t-label">Structure labels</div><div class="t-hint">Floating names on buildings and sites</div></div><span class="switch"></span></button>
       <button class="toggle" role="switch" data-action="setting-toggle" data-name="reduceMotion" data-bind="sw-reduceMotion"><div><div class="t-label">Reduce motion</div><div class="t-hint">Instant camera moves, no auto-orbit</div></div><span class="switch"></span></button>

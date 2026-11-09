@@ -48,6 +48,19 @@
       <div id="toasts" aria-live="polite"></div>
       <div class="drive-hint glass" id="drive-hint" hidden>Tap the ground to drive</div>
 
+      <!-- Walking: touch zones, joystick, contextual action, minimal status -->
+      <div class="walk-ui" id="walk-ui" hidden>
+        <div class="walk-zone" id="walk-zone"></div>
+        <div class="joy" id="joy" hidden><div class="joy-ring"></div><div class="joy-knob" id="joy-knob"></div></div>
+        <button class="sprint-btn glass" id="btn-sprint" aria-label="Sprint"></button>
+        <button class="act-btn glass" id="btn-act" hidden><span class="act-icon" id="act-icon"></span><span class="act-label" id="act-label"></span></button>
+      </div>
+      <div class="compass" id="compass" hidden aria-hidden="true"><div class="compass-tape" id="compass-tape"></div><div class="compass-mark"></div></div>
+      <div class="loc" id="loc" hidden></div>
+      <div class="discover" id="discover" hidden><span class="discover-gem"></span><b id="discover-n">0/6</b></div>
+      <button class="menu-btn glass" id="btn-menu" aria-label="Menu" hidden></button>
+      <button class="skip-btn" id="btn-skip" hidden>Skip intro</button>
+
       <div class="mastcam-hud" id="mastcam-hud" hidden aria-hidden="true">
         <div class="mc-corner tl"></div><div class="mc-corner tr"></div><div class="mc-corner bl"></div><div class="mc-corner br"></div>
         <div class="mc-reticle"></div>
@@ -78,7 +91,7 @@
 
       <nav class="dock" id="dock" aria-label="Main"></nav>
 
-      <div class="intro-title" id="intro-title" aria-hidden="true">
+      <div class="intro-title" id="intro-title" aria-hidden="false">
         <div class="intro-eyebrow">Frontier Base · Arcadia Planitia</div>
         <div class="intro-name">MARS<span>:</span> FRONTIER</div>
         <div class="intro-sub">Sol 1 · Research settlement online</div>

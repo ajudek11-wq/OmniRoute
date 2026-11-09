@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import { createNoise2D, mulberry32, smoothstep } from "./noise.js";
 import { surface } from "./surfaces.js";
-import { FLAT_ZONES, PATHS, NAMED_CRATERS, MESA, SURVEY_SITES, OBSTACLES } from "../data/layout.js";
+import { FLAT_ZONES, PATHS, NAMED_CRATERS, MESA, SURVEY_SITES, OBSTACLES, CANYON } from "../data/layout.js";
 
 export const TERRAIN_RADIUS = 3200;
 
@@ -172,8 +172,33 @@ function rawHeight(x, z) {
 }
 
 /** Ground height at (x, z). Shared by the terrain mesh, structures, rocks and the rover. */
+/** Distance from a point to the canyon centreline, and how far along it (0..1). */
+function canyonDistance(x, z) {
+  let best = Infinity;
+  const P = CANYON.path;
+  for (let i = 0; i < P.length - 1; i++) {
+    const [ax, az] = P[i];
+    const [bx, bz] = P[i + 1];
+    const dx = bx - ax;
+    const dz = bz - az;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz)));
+    const d = Math.hypot(x - (ax + dx * t), z - (az + dz * t));
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+/** Canyon depth below the plain at (x,z): a flat-floored valley with steep walls. */
+export function canyonCut(x, z) {
+  const d = canyonDistance(x, z);
+  if (d > CANYON.halfWidth) return 0;
+  const wall = 1 - smoothstep(CANYON.halfWidth * 0.55, CANYON.halfWidth, d); // 1 on the floor, 0 at rim
+  const along = 0.75 + 0.25 * Math.sin(x * 0.011 + z * 0.007); // the valley deepens and shallows
+  return CANYON.depth * along * wall;
+}
+
 export function heightAt(x, z) {
-  const base = rawHeight(x, z) + craterContribution(x, z).h;
+  const base = rawHeight(x, z) + craterContribution(x, z).h - canyonCut(x, z);
   const w = flatWeight(x, z);
   return base * (1 - w);
 }
@@ -239,6 +264,8 @@ function shadeVertices(geo) {
     c.lerp(C.dark, smoothstep(0.08, 0.32, slope) * 0.6);
     const cr = d < 1500 ? craterContribution(x, z) : { interior: 0, ice: 0, rimRock: 0 };
     c.lerp(C.dark, cr.interior * 0.3);
+    c.lerp(C.basalt, canyonCut(x, z) / CANYON.depth * 0.45);
+    c.lerp(C.basalt, canyonCut(x, z) / CANYON.depth * 0.45);
     if (d < 1500) c.lerp(C.bright, windStreak(x, z) * 0.55);
     const m = smoothstep(800, 1800, d);
     if (m > 0) {
@@ -397,6 +424,8 @@ export function buildRocks(count, castShadow, material, detail = 1) {
   const s = new THREE.Vector3();
   const t = new THREE.Vector3();
   const col = new THREE.Color();
+  const colliders = [];
+  group.userData.colliders = colliders;
   const base = [new THREE.Color("#8a5a42"), new THREE.Color("#6e4636"), new THREE.Color("#9c6b4f"), new THREE.Color("#5b3f33")];
   for (const geo of variants) {
     const mesh = new THREE.InstancedMesh(geo, material, per);
@@ -421,6 +450,7 @@ export function buildRocks(count, castShadow, material, detail = 1) {
       q.setFromEuler(e.set((rand() - 0.5) * 0.5, rand() * Math.PI * 2, (rand() - 0.5) * 0.5));
       m4.compose(t, q, s);
       mesh.setMatrixAt(placed, m4);
+      if (sc > 0.85) colliders.push({ x, z, r: sc * 0.85 });
       col.copy(base[Math.floor(rand() * base.length)]).multiplyScalar(0.85 + rand() * 0.3);
       mesh.setColorAt(placed, col);
       placed++;
