@@ -241,6 +241,13 @@ class App {
       ? "Drag to look around · pinch to zoom · tap buildings to inspect"
       : "Drag to orbit · scroll to zoom · right-drag to pan · click buildings to inspect";
     document.getElementById("btn-enter").addEventListener("click", () => this.enter(), { once: true });
+    // Deep link for development and QC: ?go=<destination id> opens that world in the desktop preview.
+    const go = new URLSearchParams(location.search).get("go");
+    if (go) {
+      this.enter();
+      if (this.introActive) this.endIntro(true);
+      this.cosmos.go(go);
+    }
 
     const onResize = () => {
       this.world.resize();
