@@ -305,7 +305,7 @@ function buildHabitat(M, quality) {
   bags.userData.dynamic = true;
   g.add(bags);
   // Pressure shell: insulated cylinder wall + structural frames.
-  cyl(g, R, R, WALL, 48, M.mli, 0, WALL / 2, 0);
+  const wallMesh = cyl(g, R, R, WALL, 48, M.mli, 0, WALL / 2, 0, { dynamic: true });
   for (const y of [0.4, 2.9, WALL]) ringAround(g, "y", R + 0.05, 0.14, M.metal, 0, y, 0);
   for (let k = 0; k < 16; k++) {
     const a = (k / 16) * Math.PI * 2;
@@ -343,15 +343,16 @@ function buildHabitat(M, quality) {
   }
   // Airlock with hatch, suitports, ramp, handrails and status light.
   const AZ = 13.6;
-  cyl(g, 1.8, 1.8, 6.4, 24, M.hull, 0, 2.0, AZ - 0.8, { rx: Math.PI / 2 });
+  const airlockTube = cyl(g, 1.8, 1.8, 6.4, 24, M.hull, 0, 2.0, AZ - 0.8, { rx: Math.PI / 2, dynamic: true });
   ringAround(g, "z", 1.85, 0.16, M.metal, 0, 2.0, AZ - 3.6);
   ringAround(g, "z", 1.85, 0.16, M.metal, 0, 2.0, AZ + 2.3);
-  cyl(g, 1.95, 1.95, 0.35, 24, M.hullDark, 0, 2.0, AZ + 2.55, { rx: Math.PI / 2 });
+  const airlockCap = cyl(g, 1.95, 1.95, 0.35, 24, M.hullDark, 0, 2.0, AZ + 2.55, { rx: Math.PI / 2, dynamic: true });
   const hatch = box(g, 1.25, 1.85, 0.14, M.metalDark, 0, 1.75, AZ + 2.76);
   hatch.userData.dynamic = true;
   let hatchOpen = 0;
-  ringAround(g, "z", 0.82, 0.07, M.metal, 0, 1.75, AZ + 2.8);
-  box(g, 0.9, 0.12, 0.1, M.hazard, 0, 2.85, AZ + 2.8, { cast: false });
+  const hatchRing = ringAround(g, "z", 0.82, 0.07, M.metal, 0, 1.75, AZ + 2.8);
+  hatchRing.userData.dynamic = true;
+  const hatchSign = box(g, 0.9, 0.12, 0.1, M.hazard, 0, 2.85, AZ + 2.8, { cast: false, dynamic: true });
   // Suitport bulkhead on the airlock flank.
   box(g, 0.2, 1.8, 2.4, M.hullDark, 1.85, 1.9, AZ - 0.6);
   for (const dz of [-0.55, 0.55]) ringAround(g, "x", 0.38, 0.07, M.metal, 1.97, 2.1, AZ - 0.6 + dz);
@@ -394,6 +395,8 @@ function buildHabitat(M, quality) {
     radius: 15,
     focus: { distance: 40, height: 5 },
     footprint: { w: 30, d: 30, round: true },
+    // Hooks for the walkable VR interior (src/cosmos/mars/): parts it re-cuts with real openings.
+    vr: { wall: wallMesh, airlockTube, airlockCap, hatch, hatchRing, hatchSign, airlockLight },
     setHatch(open) {
       hatchOpen = open ? 1 : 0;
     },
@@ -423,7 +426,7 @@ function buildLab(M) {
   mesh(g, new THREE.CylinderGeometry(3, 3, L, 32, 1, true), M.hull, 0, y, 0, { rz: Math.PI / 2 });
   mesh(g, new THREE.CylinderGeometry(3.07, 3.07, 6, 32, 1, true), M.mli, 1.5, y, 0, { rz: Math.PI / 2 });
   const cap = new THREE.SphereGeometry(3, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2);
-  mesh(g, cap, M.hull, L / 2, y, 0, { rz: -Math.PI / 2, sv: V3(1, 0.45, 1) });
+  const capEast = mesh(g, cap, M.hull, L / 2, y, 0, { rz: -Math.PI / 2, sv: V3(1, 0.45, 1), dynamic: true });
   mesh(g, cap, M.hull, -L / 2, y, 0, { rz: Math.PI / 2, sv: V3(1, 0.45, 1) });
   for (const x of [-L / 2, -4.6, -1.5, 4.5, L / 2]) ringAround(g, "x", 3.06, 0.13, x === -4.6 ? M.orange : M.metal, x, y, 0);
   // Window strip + access panels.
@@ -468,6 +471,7 @@ function buildLab(M) {
     radius: 12,
     focus: { distance: 32, height: 3 },
     footprint: { w: 22, d: 9 },
+    vr: { capEast },
     update(t, env, sim) {
       anemo.rotation.y += 0.05 + (sim?.flows?.tau ?? 0.5) * 0.02;
     },
@@ -1996,6 +2000,7 @@ export function buildSettlement(quality) {
   return {
     root,
     materials: M,
+    tunnels,
     structures,
     sites,
     pickables,
