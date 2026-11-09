@@ -3,7 +3,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { heightAt } from "./terrain.js";
 import { glowTexture } from "./world.js";
 import { surface } from "./surfaces.js";
-import { STRUCTURE_POS as P, PATHS, SURVEY_SITES } from "../data/layout.js";
+import { STRUCTURE_POS as P, PATHS, SURVEY_SITES, STRUCTURE_COLLIDERS, LINK_COLLIDERS } from "../data/layout.js";
 import { mulberry32 } from "./noise.js";
 
 const V2 = (x, y) => new THREE.Vector2(x, y);
@@ -154,6 +154,121 @@ function hitProxy(group, geo, y) {
 function fixture(parent, M, x, y, z, ry = 0, w = 0.6) {
   box(parent, w, 0.16, 0.22, M.metalDark, x, y, z, { ry, cast: false });
   box(parent, w * 0.85, 0.05, 0.18, M.lampHead, x, y - 0.09, z, { ry, cast: false });
+}
+
+/** Point on a vertical shell: bearing a (rad from +z toward +x), radius r, sideways offset lat, height y. */
+function pp(a, r, y = 0, lat = 0) {
+  return V3(Math.sin(a) * r + Math.cos(a) * lat, y, Math.cos(a) * r - Math.sin(a) * lat);
+}
+const put = (parent, geo, mat, v, o) => mesh(parent, geo, mat, v.x, v.y, v.z, o);
+/** Thin open band hugging a vertical cylinder (panel seams, painted stripes). */
+const band = (p, r, h, mat, y, seg = 40) => mesh(p, new THREE.CylinderGeometry(r, r, h, seg, 1, true), mat, 0, y, 0);
+/** Light fixture whose housing shares the metalDark shadow-casting bucket. */
+function lamp(parent, M, v, ry = 0, w = 0.6) {
+  box(parent, w, 0.16, 0.22, M.metalDark, v.x, v.y, v.z, { ry });
+  box(parent, w * 0.85, 0.05, 0.18, M.lampHead, v.x, v.y - 0.09, v.z, { ry, cast: false });
+}
+const BOLT = new THREE.CylinderGeometry(0.035, 0.035, 0.08, 6).rotateX(Math.PI / 2);
+/** Bolt heads around a vertical shell at height y (skip(a) leaves gaps at openings). */
+function boltRing(parent, mat, r, y, n, skip) {
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    if (!skip?.(a)) put(parent, BOLT, mat, pp(a, r, y), { ry: a });
+  }
+}
+/** Bolt heads on a flange facing bearing ry, centred at c. */
+function boltCircle(parent, mat, c, ry, r, n) {
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2;
+    mesh(parent, BOLT, mat, c.x + Math.cos(ry) * Math.cos(t) * r, c.y + Math.sin(t) * r, c.z - Math.sin(ry) * Math.cos(t) * r, { ry });
+  }
+}
+/** Double-faced corrugated sheet in the XY plane (ridges run along y). */
+function corrugatedGeo(w, h, pitch = 0.2, depth = 0.045) {
+  const front = new THREE.PlaneGeometry(w, h, Math.max(4, Math.round((w / pitch) * 4)), 1);
+  const p = front.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setZ(i, Math.sin((p.getX(i) / pitch) * Math.PI * 2) * depth);
+  front.computeVertexNormals();
+  const back = front.clone().rotateY(Math.PI);
+  const g = mergeGeometries([front.toNonIndexed(), back.toNonIndexed()]);
+  front.dispose();
+  back.dispose();
+  return g;
+}
+/** Faceted prism (flat-shaded cylinder). */
+function prismGeo(r, h, sides, start = 0) {
+  const g = new THREE.CylinderGeometry(r, r, h, sides, 1, false, start).toNonIndexed();
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Cargo container (length along local x): corrugated sides, corner posts, rails and door locking bars. */
+const CONTAINER_SIDES = new Map();
+function container(parent, M, mat, len, x, y, z, ry = 0) {
+  const c = new THREE.Group();
+  c.position.set(x, y, z);
+  c.rotation.y = ry;
+  parent.add(c);
+  const H = 2.59;
+  const W = 2.44;
+  box(c, len - 0.1, H - 0.12, W - 0.16, mat, 0, H / 2, 0);
+  if (!CONTAINER_SIDES.has(len)) CONTAINER_SIDES.set(len, corrugatedGeo(len - 0.34, H - 0.34, 0.27, 0.035));
+  for (const s of [-1, 1]) mesh(c, CONTAINER_SIDES.get(len), mat, 0, H / 2, s * (W / 2 - 0.05));
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) box(c, 0.17, H, 0.17, M.metalDark, sx * (len / 2 - 0.085), H / 2, sz * (W / 2 - 0.085));
+    box(c, 0.14, 0.16, W, M.metalDark, sx * (len / 2 - 0.07), 0.08, 0);
+    box(c, 0.14, 0.16, W, M.metalDark, sx * (len / 2 - 0.07), H - 0.08, 0);
+  }
+  for (const sz of [-1, 1]) {
+    box(c, len, 0.16, 0.12, M.metalDark, 0, 0.08, sz * (W / 2 - 0.06));
+    box(c, len, 0.14, 0.12, M.metalDark, 0, H - 0.07, sz * (W / 2 - 0.06));
+  }
+  // Door end (+x): two leaves, four locking bars with cam handles.
+  box(c, 0.04, H - 0.4, 0.03, M.metalDark, len / 2 + 0.005, H / 2, 0);
+  for (const bz of [-0.95, -0.4, 0.4, 0.95]) {
+    cyl(c, 0.028, 0.028, H - 0.36, 5, M.metal, len / 2 + 0.04, H / 2, bz);
+    box(c, 0.05, 0.05, 0.3, M.metal, len / 2 + 0.07, 1.1, bz + (bz > 0 ? -0.15 : 0.15));
+  }
+  return c;
+}
+
+/** Flexible, insulated bellows tunnel on cradle supports with a cable tray alongside. */
+function buildBellows(M, a, b, y, r) {
+  const g = new THREE.Group();
+  const A = V3(a.x, y, a.z);
+  const B = V3(b.x, y, b.z);
+  const dir = B.clone().sub(A);
+  const len = dir.length();
+  dir.normalize();
+  const ry = Math.atan2(dir.x, dir.z);
+  const n = Math.round(len / 0.34) * 2;
+  const prof = [];
+  for (let i = 0; i <= n; i++) prof.push(V2(r + (i % 2 ? 0.075 : 0), (i / n) * len - len / 2));
+  const bel = mesh(g, new THREE.LatheGeometry(prof, 20), M.mli, (A.x + B.x) / 2, y, (A.z + B.z) / 2);
+  bel.quaternion.setFromUnitVectors(_up, dir);
+  const along = (d, up = 0, lat = 0) => V3(A.x + dir.x * d + Math.cos(ry) * lat, y + up, A.z + dir.z * d - Math.sin(ry) * lat);
+  // Clamp rings at the hard points + support cradles.
+  for (const d of [1.0, len - 0.7]) strut(g, along(d - 0.25), along(d + 0.25), r + 0.16, M.metal, { seg: 20 });
+  const supports = Math.max(2, Math.round(len / 3.2));
+  for (let i = 1; i < supports; i++) {
+    const d = (i / supports) * len;
+    strut(g, along(d - 0.12), along(d + 0.12), r + 0.11, M.metalDark, { seg: 20 });
+    const s = along(d, -r - 0.12, 0.3);
+    box(g, 2 * r + 1.0, 0.18, 0.32, M.metal, s.x, s.y, s.z, { ry });
+    for (const lat of [-(r - 0.25), r - 0.15]) {
+      const f = along(d, 0, lat);
+      const h = y - r - 0.2;
+      box(g, 0.18, h, 0.18, M.metal, f.x, h / 2, f.z, { ry });
+      box(g, 0.5, 0.08, 0.5, M.metalDark, f.x, 0.04, f.z, { ry });
+    }
+  }
+  // Cable tray riding on the cradle arms, with a power conduit.
+  const t0 = along(0.6, -r + 0.04, r + 0.6);
+  const t1 = along(len - 0.6, -r + 0.04, r + 0.6);
+  strut(g, t0, t1, 0.05, M.orange, { seg: 6 });
+  const tm = t0.clone().add(t1).multiplyScalar(0.5);
+  box(g, 0.36, 0.06, len - 1.2, M.metalDark, tm.x, tm.y - 0.08, tm.z, { ry });
+  return g;
 }
 
 // ═══ Structures ═══════════════════════════════════════════════
@@ -880,6 +995,746 @@ function buildFission(M) {
   };
 }
 
+const DEG = Math.PI / 180;
+/** South end of the battery bank's cable tray, where Habitat B's trench joins it. */
+const TRENCH_END = { x: 40, z: -6.3 };
+const nearAngle = (a, list, tol) => list.some((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))) < tol);
+
+/** Habitat B: a two-deck vertical module (medical bay below, command deck above). */
+function buildHabitatB(M) {
+  const g = new THREE.Group();
+  const R = 4.6;
+  const Y0 = 1.0; // underside of the pressure shell (levelling jacks below)
+  const H = 8;
+  const YT = Y0 + H;
+  const TY = 2.4; // tunnel centreline
+  const AY = 2.5; // airlock centreline
+  const aPort = Math.atan2(P.habitat.x - P.habitatB.x, P.habitat.z - P.habitatB.z);
+  const aAir = 40 * DEG;
+  const aLad = 140 * DEG;
+  const lowerPorts = [-25, 5, 115].map((d) => d * DEG);
+  const conduits = [80, 86, 92].map((d) => d * DEG);
+
+  // Footing: sintered pad, eight screw jacks with braces, bottom bulkhead.
+  cyl(g, R + 1.7, R + 2.0, 0.24, 12, M.sintered, 0, 0.12, 0);
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2 + 0.39;
+    const f = pp(a, R - 0.8, 0);
+    box(g, 0.3, Y0 - 0.2, 0.3, M.metal, f.x, 0.24 + (Y0 - 0.2) / 2, f.z, { ry: a });
+    cyl(g, 0.24, 0.24, 0.16, 10, M.metalDark, f.x, 0.62, f.z);
+    box(g, 0.8, 0.1, 0.8, M.metalDark, f.x, 0.29, f.z, { ry: a });
+    strut(g, pp(a + 0.21, R - 1.9, 0.3), pp(a, R - 0.85, Y0 - 0.05), 0.04, M.metal);
+  }
+  cyl(g, R - 0.12, R - 0.4, 0.36, 32, M.hullDark, 0, Y0 + 0.18, 0);
+  // Pressure shell, deck frames, seam bands and a yellow identification band.
+  mesh(g, new THREE.CylinderGeometry(R, R, H, 40, 1, true), M.hull, 0, Y0 + H / 2, 0);
+  for (const y of [Y0 + 0.12, Y0 + H / 2, YT - 0.08]) ringAround(g, "y", R + 0.05, 0.12, M.metal, 0, y, 0);
+  for (const y of [Y0 + H * 0.25, Y0 + H * 0.75]) band(g, R + 0.012, 0.05, M.hullDark, y);
+  band(g, R + 0.02, 0.32, M.hazard, Y0 + H / 2 + 0.34);
+  const openings = (a) => nearAngle(a, [aPort, aAir], 21 * DEG);
+  boltRing(g, M.metalDark, R + 0.03, Y0 + H / 2 - 0.24, 48);
+  boltRing(g, M.metalDark, R + 0.03, Y0 + 0.36, 40, openings);
+  // Stringers: full height on the upper deck, gapped round openings on the lower deck.
+  for (const d of [-35, -5, 25, 55, 85, 115, 160, 200, 250, 290]) {
+    const a = d * DEG;
+    const p = pp(a, R + 0.07);
+    box(g, 0.2, H / 2 - 0.3, 0.12, M.metal, p.x, Y0 + H * 0.75, p.z, { ry: a });
+    if (!openings(a) && !nearAngle(a, [...lowerPorts, ...conduits], 8 * DEG)) box(g, 0.2, H / 2 - 0.3, 0.12, M.metal, p.x, Y0 + H * 0.25, p.z, { ry: a });
+  }
+  // Command-deck windows with frames and sunshade eyebrows.
+  const yW = Y0 + H * 0.72;
+  const winGeo = new THREE.BoxGeometry(1.05, 0.8, 0.12);
+  for (const d of [-50, -20, 10, 40, 70, 100]) {
+    const a = d * DEG;
+    put(g, winGeo, M.window, pp(a, R + 0.03, yW), { ry: a, cast: false });
+    const f = pp(a, R - 0.01, yW);
+    box(g, 1.35, 1.1, 0.1, M.metalDark, f.x, f.y, f.z, { ry: a });
+    const s = pp(a, R + 0.3, yW + 0.66);
+    box(g, 1.55, 0.06, 0.55, M.hullDark, s.x, s.y, s.z, { ry: a });
+  }
+  // Medical-bay portholes.
+  const port = new THREE.CylinderGeometry(0.32, 0.32, 0.12, 16).rotateX(Math.PI / 2);
+  const portRing = new THREE.TorusGeometry(0.37, 0.06, 6, 16);
+  for (const a of lowerPorts) {
+    put(g, port, M.window, pp(a, R + 0.02, 2.9), { ry: a, cast: false });
+    put(g, portRing, M.metalDark, pp(a, R + 0.06, 2.9), { ry: a });
+  }
+  // Tunnel port: docking collar, flange and bolt circle.
+  strut(g, pp(aPort, R - 0.3, TY), pp(aPort, R + 1.0, TY), 1.42, M.hullDark, { seg: 24 });
+  strut(g, pp(aPort, R + 0.15, TY), pp(aPort, R + 0.42, TY), 1.45, M.hazard, { seg: 24 });
+  put(g, new THREE.TorusGeometry(1.52, 0.1, 6, 32), M.metal, pp(aPort, R + 0.95, TY), { ry: aPort });
+  boltCircle(g, M.metalDark, pp(aPort, R + 1.04, TY), aPort, 1.52, 18);
+  lamp(g, M, pp(aPort, R + 0.25, TY + 1.75), aPort);
+  // Airlock: cylinder, end bulkhead, hatch with handwheel, suitports with docked suits.
+  strut(g, pp(aAir, R - 0.4, AY), pp(aAir, R + 3.0, AY), 1.3, M.hull, { seg: 24 });
+  for (const r of [R + 0.5, R + 2.85]) put(g, new THREE.TorusGeometry(1.36, 0.1, 6, 32), M.metal, pp(aAir, r, AY), { ry: aAir });
+  strut(g, pp(aAir, R + 3.0, AY), pp(aAir, R + 3.25, AY), 1.4, M.hullDark, { seg: 24 });
+  boltCircle(g, M.metal, pp(aAir, R + 3.27, AY), aAir, 1.25, 16);
+  const hf = pp(aAir, R + 3.27, 2.4);
+  box(g, 1.25, 1.85, 0.05, M.metal, hf.x, hf.y, hf.z, { ry: aAir });
+  const hatch = pp(aAir, R + 3.31, 2.4);
+  box(g, 1.0, 1.6, 0.1, M.metalDark, hatch.x, hatch.y, hatch.z, { ry: aAir });
+  put(g, new THREE.TorusGeometry(0.22, 0.03, 4, 14), M.metal, pp(aAir, R + 3.38, 2.5), { ry: aAir });
+  const hz = pp(aAir, R + 3.3, 3.45);
+  box(g, 1.2, 0.12, 0.06, M.hazard, hz.x, hz.y, hz.z, { ry: aAir });
+  const led = pp(aAir, R + 3.3, 3.3, 0.72);
+  box(g, 0.14, 0.14, 0.05, M.led, led.x, led.y, led.z, { ry: aAir, cast: false });
+  lamp(g, M, pp(aAir, R + 3.2, 3.8), aAir, 0.7);
+  const bulk = pp(aAir, R + 1.7, AY, 1.36);
+  box(g, 0.24, 1.9, 2.0, M.hullDark, bulk.x, bulk.y, bulk.z, { ry: aAir });
+  for (const dr of [-0.55, 0.55]) {
+    put(g, new THREE.TorusGeometry(0.4, 0.07, 6, 18), M.metal, pp(aAir, R + 1.7 + dr, 2.6, 1.5), { ry: aAir + Math.PI / 2 });
+    const pl = pp(aAir, R + 1.7 + dr, 2.45, 1.7);
+    box(g, 0.32, 0.85, 0.62, M.hull, pl.x, pl.y, pl.z, { ry: aAir });
+    const st = pp(aAir, R + 1.7 + dr, 2.95, 1.87);
+    box(g, 0.04, 0.08, 0.5, M.hazard, st.x, st.y, st.z, { ry: aAir });
+  }
+  for (let i = 0; i < 3; i++) {
+    const h = 1.5 - i * 0.5;
+    const s = pp(aAir, R + 3.62 + i * 0.5, h / 2);
+    box(g, 1.7, h, 0.5, M.metalDark, s.x, s.y, s.z, { ry: aAir });
+  }
+  const pad = pp(aAir, R + 5.7, 0.06);
+  box(g, 2.6, 0.12, 2.2, M.sintered, pad.x, pad.y, pad.z, { ry: aAir });
+  for (const s of [-1, 1]) {
+    tube(g, [pp(aAir, R + 3.4, 2.55, s), pp(aAir, R + 4.6, 1.6, s), pp(aAir, R + 5.1, 1.05, s)], 0.035, M.metal, { seg: 8, radial: 4 });
+    for (const [r, y0] of [
+      [R + 3.62, 1.5],
+      [R + 4.62, 0.5],
+    ]) {
+      const q = pp(aAir, r, y0 + 0.5, s);
+      cyl(g, 0.03, 0.03, 1.0, 5, M.metal, q.x, q.y, q.z);
+    }
+  }
+  // Exterior ladder with safety cage to the roof.
+  for (const s of [-0.24, 0.24]) {
+    const q = pp(aLad, R + 0.42, (0.3 + YT + 1.2) / 2, s);
+    box(g, 0.06, YT + 0.9, 0.06, M.metal, q.x, q.y, q.z, { ry: aLad });
+  }
+  for (let y = 0.65; y < YT + 0.9; y += 0.32) {
+    const q = pp(aLad, R + 0.42, y);
+    box(g, 0.48, 0.035, 0.035, M.metal, q.x, q.y, q.z, { ry: aLad });
+  }
+  for (let y = 1.6; y < YT; y += 2.2) {
+    const q = pp(aLad, R + 0.22, y);
+    box(g, 0.56, 0.06, 0.42, M.metalDark, q.x, q.y, q.z, { ry: aLad });
+  }
+  const hoop = new THREE.TorusGeometry(0.42, 0.025, 4, 12, Math.PI).rotateX(Math.PI / 2);
+  for (let y = 2.6; y < YT + 1.0; y += 1.0) put(g, hoop, M.metal, pp(aLad, R + 0.42, y), { ry: aLad });
+  for (const [r, lat] of [
+    [R + 0.84, 0],
+    [R + 0.72, 0.3],
+    [R + 0.72, -0.3],
+  ]) {
+    const q = pp(aLad, r, (2.6 + YT + 0.6) / 2, lat);
+    box(g, 0.03, YT - 2.0, 0.03, M.metal, q.x, q.y, q.z, { ry: aLad });
+  }
+  // Radiator panels on stand-off struts with coolant manifolds.
+  for (const d of [195, 232]) {
+    const a = d * DEG;
+    const c = pp(a, R + 1.05, Y0 + 4.2);
+    box(g, 2.0, 4.4, 0.06, M.radiator, c.x, c.y, c.z, { ry: a });
+    for (const y of [Y0 + 2.2, Y0 + 6.2]) {
+      for (const lat of [-0.7, 0.7]) strut(g, pp(a, R + 0.05, y, lat), pp(a, R + 1.0, y, lat), 0.05, M.metal);
+      strut(g, pp(a, R + 1.12, y, -1.05), pp(a, R + 1.12, y, 1.05), 0.06, M.metalDark);
+    }
+    tube(g, [pp(a, R + 1.12, Y0 + 2.2, 1.05), pp(a, R + 0.6, Y0 + 1.5, 1.2), pp(a, R + 0.06, Y0 + 1.3, 1.1)], 0.045, M.metalDark, { seg: 8, radial: 4 });
+  }
+  // Conduits down the shell into a junction box and a covered cable trench to the battery bank.
+  conduits.forEach((a, i) => {
+    tube(g, [pp(a, R + 0.18, YT - 0.4), pp(a, R + 0.18, 1.6), pp(a, R + 0.7, 0.55), pp(a, R + 1.25, 0.3)], 0.07, i === 1 ? M.orange : M.metalDark, { seg: 16, radial: 6 });
+  });
+  for (let y = 2.2; y < YT - 0.5; y += 1.6) {
+    const q = pp(86 * DEG, R + 0.13, y);
+    box(g, 0.62, 0.08, 0.14, M.metal, q.x, q.y, q.z, { ry: 86 * DEG });
+  }
+  const jb = pp(86 * DEG, R + 1.5, 0.45);
+  box(g, 0.9, 0.7, 0.6, M.hullDark, jb.x, jb.y, jb.z, { ry: 86 * DEG });
+  const t0 = pp(86 * DEG, R + 1.9, 0.07);
+  const t1 = V3(TRENCH_END.x - P.habitatB.x, 0.07, TRENCH_END.z - P.habitatB.z);
+  const tl = t0.distanceTo(t1);
+  box(g, 0.62, 0.12, tl, M.metalDark, (t0.x + t1.x) / 2, 0.06, (t0.z + t1.z) / 2, { ry: Math.atan2(t1.x - t0.x, t1.z - t0.z) });
+  // Roof: chamfered edge, handrail, hatch, life-support unit, antennas and beacon.
+  mesh(g, new THREE.CylinderGeometry(R - 0.45, R, 0.5, 40), M.hull, 0, YT + 0.25, 0);
+  put(g, new THREE.TorusGeometry(R - 0.7, 0.035, 4, 40).rotateX(Math.PI / 2), M.metal, V3(0, YT + 1.45, 0));
+  for (let k = 0; k < 10; k++) {
+    const q = pp((k / 10) * Math.PI * 2 + 0.1, R - 0.7, YT + 0.97);
+    cyl(g, 0.03, 0.03, 0.95, 5, M.metal, q.x, q.y, q.z);
+  }
+  const rh = pp(aLad, R - 1.5, YT + 0.62);
+  cyl(g, 0.62, 0.62, 0.26, 18, M.metalDark, rh.x, rh.y, rh.z);
+  const ec = pp(250 * DEG, 1.6, YT + 0.95);
+  box(g, 1.8, 0.9, 1.2, M.hullDark, ec.x, ec.y, ec.z, { ry: 250 * DEG });
+  for (const lat of [-0.45, 0.45]) put(g, new THREE.TorusGeometry(0.27, 0.04, 6, 16).rotateX(Math.PI / 2), M.metalDark, pp(250 * DEG, 1.6, YT + 1.42, lat));
+  const mb = pp(330 * DEG, 2.2, YT + 0.8);
+  box(g, 1.0, 0.55, 0.7, M.mli, mb.x, mb.y, mb.z, { ry: 330 * DEG });
+  const dm = pp(20 * DEG, 2.4, YT);
+  cyl(g, 0.05, 0.05, 1.6, 6, M.metal, dm.x, YT + 1.3, dm.z);
+  mesh(g, new THREE.SphereGeometry(0.55, 14, 6, 0, Math.PI * 2, 0, Math.PI / 2.5), M.radiator, dm.x, YT + 2.1, dm.z, { rx: -0.9, ry: 0.4 });
+  const am = pp(160 * DEG, 2.6, YT);
+  cyl(g, 0.05, 0.05, 3.2, 6, M.metal, am.x, YT + 2.1, am.z);
+  for (const lat of [-0.5, 0.5]) {
+    const q = pp(160 * DEG, 2.3, YT, lat);
+    cyl(g, 0.018, 0.018, 2.2, 4, M.metal, q.x, YT + 1.6, q.z);
+  }
+  const beacon = mesh(g, new THREE.SphereGeometry(0.17, 10, 8), M.beaconRed, am.x, YT + 3.8, am.z, { cast: false, dynamic: true });
+  lamp(g, M, pp(aLad + 0.45, R + 0.24, 5.4), aLad + 0.45);
+  lamp(g, M, pp(-40 * DEG, R + 0.24, Y0 + H / 2 - 0.5), -40 * DEG);
+  bakeStatic(g);
+  const hit = hitProxy(g, new THREE.CylinderGeometry(6.5, 6.5, 12, 12), 5.5);
+  return {
+    group: g,
+    hit,
+    radius: 7,
+    focus: { distance: 26, height: 5 },
+    footprint: { w: 12, d: 12, round: true },
+    update(t) {
+      beacon.visible = Math.sin(t * 2.4 + 1.3) > 0.6;
+    },
+  };
+}
+
+/** Storage & maintenance yard: open repair shelter, gantry crane, cargo containers and spares. */
+function buildYard(M) {
+  const g = new THREE.Group();
+  const rand = mulberry32(91);
+  box(g, 16.5, 0.14, 26.5, M.sintered, 0, 0.07, 0);
+  // ── Mono-pitch portal-frame shelter, open to the west and south ──
+  const fx = -0.6;
+  const bx = 7.6;
+  const hF = 6.2;
+  const hB = 5.0;
+  const slope = Math.atan2(hF - hB, bx - fx);
+  const yr = (x) => 5.65 - (x - 3.5) * Math.tan(slope);
+  for (const z of [-12.5, -9, -5.5, -2, 1.5]) {
+    box(g, 0.32, hF, 0.32, M.metal, fx, hF / 2, z);
+    box(g, 0.32, hB, 0.32, M.metal, bx, hB / 2, z);
+    for (const x of [fx, bx]) {
+      box(g, 0.7, 0.06, 0.7, M.metalDark, x, 0.17, z);
+      for (const [dx, dz] of [
+        [-0.24, -0.24],
+        [0.24, -0.24],
+        [0.24, 0.24],
+        [-0.24, 0.24],
+      ])
+        mesh(g, BOLT, M.metalDark, x + dx, 0.22, z + dz, { rx: Math.PI / 2 });
+    }
+    box(g, Math.hypot(bx - fx, hF - hB) + 0.6, 0.34, 0.2, M.metal, 3.5, yr(3.5), z, { rz: -slope });
+    strut(g, V3(fx, hF - 1.5, z), V3(fx + 1.3, yr(fx + 1.3) - 0.12, z), 0.05, M.metal);
+    strut(g, V3(bx, hB - 1.3, z), V3(bx - 1.3, yr(bx - 1.3) - 0.12, z), 0.05, M.metal);
+  }
+  for (const x of [-1.1, 1.2, 3.5, 5.8, 8.1]) box(g, 0.12, 0.14, 14.6, M.metalDark, x, yr(x) + 0.24, -5.5);
+  const roof = corrugatedGeo(14.8, 10.0, 0.2, 0.045);
+  roof.rotateX(-Math.PI / 2).rotateY(Math.PI / 2).rotateZ(-slope).translate(3.5, yr(3.5) + 0.36, -5.5);
+  mesh(g, roof, M.metal);
+  const wall = corrugatedGeo(14.4, hB - 0.4);
+  wall.rotateY(Math.PI / 2).translate(bx + 0.22, (hB - 0.4) / 2 + 0.35, -5.5);
+  mesh(g, wall, M.metal);
+  const endWall = corrugatedGeo(6.6, hB - 0.4);
+  endWall.translate(4.3, (hB - 0.4) / 2 + 0.35, -12.72);
+  mesh(g, endWall, M.metal);
+  for (const y of [1.8, 3.6]) box(g, 0.1, 0.12, 14.4, M.metalDark, bx + 0.11, y, -5.5);
+  box(g, 0.14, 0.42, 14.4, M.metalDark, bx + 0.2, 0.35, -5.5);
+  box(g, 6.6, 0.42, 0.14, M.metalDark, 4.3, 0.35, -12.62);
+  for (const z of [-9, -5.5, -2]) {
+    box(g, 1.2, 0.1, 0.25, M.metalDark, 3.5, yr(3.5) - 0.32, z);
+    box(g, 1.0, 0.04, 0.2, M.lampHead, 3.5, yr(3.5) - 0.39, z, { cast: false });
+  }
+  // Workbench, vice, tool chest, pegboard and parts shelving.
+  box(g, 0.95, 0.08, 3.4, M.hullDark, 6.6, 0.95, -3.3);
+  for (const [dx, dz] of [
+    [-0.4, -1.6],
+    [0.4, -1.6],
+    [-0.4, 1.6],
+    [0.4, 1.6],
+  ])
+    box(g, 0.07, 0.8, 0.07, M.metal, 6.6 + dx, 0.54, -3.3 + dz);
+  box(g, 0.85, 0.04, 3.2, M.metalDark, 6.6, 0.36, -3.3);
+  box(g, 0.32, 0.22, 0.26, M.metalDark, 6.35, 1.1, -4.6);
+  cyl(g, 0.26, 0.26, 0.2, 14, M.metal, 6.6, 1.09, -2.8);
+  box(g, 0.6, 1.0, 0.9, M.orange, 6.95, 0.64, -1.35);
+  for (const y of [0.36, 0.62, 0.88]) box(g, 0.02, 0.025, 0.8, M.metalDark, 6.64, y, -1.35);
+  box(g, 0.05, 1.4, 3.4, M.hullDark, bx - 0.2, 1.95, -3.3);
+  for (let i = 0; i < 11; i++) {
+    const z = -4.8 + i * 0.29 + (rand() - 0.5) * 0.06;
+    const h = 0.25 + rand() * 0.3;
+    box(g, 0.04, h, 0.06, M.metal, bx - 0.26, 2.2 - h / 2 + rand() * 0.3, z);
+  }
+  for (const z of [-9.2, -6.8]) for (const x of [6.7, 7.3]) box(g, 0.06, 2.4, 0.06, M.metal, x, 1.34, z);
+  for (const y of [0.45, 1.25, 2.05]) {
+    box(g, 0.7, 0.04, 2.5, M.metalDark, 7.0, y, -8.0);
+    for (let i = 0; i < 4; i++) {
+      const s = 0.3 + rand() * 0.25;
+      box(g, 0.5, s, 0.48, [M.orange, M.hazard, M.hullDark][(i + Math.round(y)) % 3], 7.0, y + 0.02 + s / 2, -9.0 + i * 0.6 + rand() * 0.06);
+    }
+  }
+  // Spare rover wheels (three stacked, one leaning), air compressor.
+  const grouser = new THREE.BoxGeometry(0.06, 0.4, 0.08);
+  for (let i = 0; i < 3; i++) {
+    const y = 0.35 + i * 0.43;
+    cyl(g, 0.55, 0.55, 0.4, 20, M.metalDark, 2.2, y, -10.6, { ry: i * 0.4 });
+    cyl(g, 0.26, 0.26, 0.42, 12, M.metal, 2.2, y, -10.6);
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2 + i * 0.3;
+      mesh(g, grouser, M.metal, 2.2 + Math.sin(a) * 0.56, y, -10.6 + Math.cos(a) * 0.56, { ry: a });
+    }
+  }
+  cyl(g, 0.55, 0.55, 0.4, 20, M.metalDark, 3.12, 0.56, -10.3, { rz: Math.PI / 2 + 0.22 });
+  cyl(g, 0.26, 0.26, 0.42, 12, M.metal, 3.12, 0.56, -10.3, { rz: Math.PI / 2 + 0.22 });
+  cyl(g, 0.32, 0.32, 1.3, 14, M.hazard, 1.6, 0.55, -6.2, { rz: Math.PI / 2 });
+  for (const dx of [-0.45, 0.45]) box(g, 0.12, 0.25, 0.5, M.metalDark, 1.6 + dx, 0.26, -6.2);
+  box(g, 0.5, 0.36, 0.4, M.metalDark, 1.5, 1.02, -6.2);
+  put(g, new THREE.TorusGeometry(0.24, 0.035, 5, 14).rotateX(Math.PI / 2), M.metalDark, V3(2.25, 0.9, -6.2));
+  // ── Gantry crane on rails over the container stacks ──
+  for (const x of [-7.8, -2.8]) {
+    box(g, 0.2, 0.12, 24, M.metalDark, x, 0.2, 0.5);
+    for (const z of [-11.5, 12.5]) box(g, 0.34, 0.3, 0.2, M.hazard, x, 0.3, z);
+    box(g, 0.5, 0.5, 3.4, M.hazard, x, 0.55, 3.0);
+    for (const dz of [-1.2, 1.2]) cyl(g, 0.24, 0.24, 0.3, 12, M.metalDark, x, 0.36, 3 + dz, { rz: Math.PI / 2 });
+    strut(g, V3(x, 0.8, 1.5), V3(x, 7.1, 3), 0.13, M.hazard, { seg: 8 });
+    strut(g, V3(x, 0.8, 4.5), V3(x, 7.1, 3), 0.13, M.hazard, { seg: 8 });
+    strut(g, V3(x, 3.0, 2.05), V3(x, 3.0, 3.95), 0.07, M.hazard);
+    box(g, 0.6, 0.7, 1.3, M.hazard, x, 7.35, 3);
+  }
+  for (const dz of [-0.35, 0.35]) box(g, 5.6, 0.55, 0.28, M.hazard, -5.3, 7.35, 3 + dz);
+  box(g, 1.3, 0.32, 0.02, M.hull, -5.3, 7.35, 3.5);
+  const trolley = new THREE.Group();
+  trolley.position.set(-5.3, 7.62, 3);
+  box(trolley, 0.9, 0.3, 1.1, M.metalDark, 0, 0.15, 0);
+  cyl(trolley, 0.22, 0.22, 0.8, 12, M.metalDark, 0, 0.47, 0, { rx: Math.PI / 2 });
+  box(trolley, 0.5, 0.4, 0.4, M.hazard, 0.36, 0.5, 0);
+  for (const dz of [-0.12, 0.12]) cyl(trolley, 0.018, 0.018, 3.0, 4, M.metalDark, 0, -1.55, dz);
+  box(trolley, 0.32, 0.4, 0.42, M.hazard, 0, -3.25, 0);
+  for (const [dx, dz] of [
+    [-0.5, -0.45],
+    [0.5, -0.45],
+    [-0.5, 0.45],
+    [0.5, 0.45],
+  ])
+    strut(trolley, V3(0, -3.45, 0), V3(dx, -4.4, dz), 0.015, M.metalDark, { seg: 3 });
+  cyl(trolley, 0.55, 0.55, 1.4, 16, M.hull, 0, -4.9, 0, { rz: Math.PI / 2 });
+  for (const dx of [-0.5, 0.5]) cyl(trolley, 0.57, 0.57, 0.12, 16, M.hazard, dx, -4.9, 0, { rz: Math.PI / 2 });
+  bakeStatic(trolley);
+  trolley.userData.dynamic = true;
+  g.add(trolley);
+  // ── Containers of varied size and colour, stacked two high ──
+  container(g, M, M.orange, 6.06, -5.3, 0.14, -8.6, Math.PI / 2);
+  container(g, M, M.hullDark, 6.06, -5.24, 2.73, -8.52, Math.PI / 2 + 0.025);
+  container(g, M, M.hull, 6.06, -5.3, 0.14, -2.5, Math.PI / 2 - 0.012);
+  container(g, M, M.hazard, 3.0, -5.36, 2.73, -3.9, Math.PI / 2 + 0.04);
+  container(g, M, M.orange, 3.0, -5.6, 0.14, 7.6, 0.12);
+  // Pressurised cargo pod on a lifting frame.
+  box(g, 2.2, 0.2, 2.2, M.metalDark, -6.3, 0.24, 11.0);
+  cyl(g, 0.95, 0.95, 1.9, 20, M.hull, -6.3, 1.29, 11.0);
+  for (const y of [0.6, 1.95]) cyl(g, 0.98, 0.98, 0.14, 20, M.hazard, -6.3, y, 11.0);
+  mesh(g, new THREE.SphereGeometry(0.95, 20, 6, 0, Math.PI * 2, 0, Math.PI / 2), M.hull, -6.3, 2.24, 11.0, { sv: V3(1, 0.35, 1) });
+  for (const a of [0.4, 2.0, 3.6, 5.2]) box(g, 0.12, 0.3, 0.12, M.metalDark, -6.3 + Math.cos(a) * 0.6, 2.5, 11.0 + Math.sin(a) * 0.6);
+  // Pallets with crates and drums.
+  const pallet = (x, z, ry) => {
+    const p = new THREE.Group();
+    p.position.set(x, 0.14, z);
+    p.rotation.y = ry;
+    g.add(p);
+    for (const dz of [-0.45, 0, 0.45]) box(p, 0.12, 0.1, 1.2, M.hullDark, dz, 0.05, 0);
+    for (const dx of [-0.48, -0.16, 0.16, 0.48]) box(p, 0.24, 0.04, 1.2, M.hullDark, 0, 0.12, dx, { ry: Math.PI / 2 });
+    return p;
+  };
+  const p1 = pallet(0.2, 7.0, 0.1);
+  box(p1, 1.0, 1.0, 1.0, M.orange, 0, 0.64, 0);
+  box(p1, 1.03, 0.06, 1.03, M.metalDark, 0, 0.5, 0);
+  box(p1, 0.6, 0.55, 0.6, M.hullDark, 0.1, 1.42, -0.05, { ry: 0.3 });
+  const p2 = pallet(0.4, 10.4, -0.15);
+  for (const [dx, dz] of [
+    [-0.3, -0.3],
+    [0.3, -0.3],
+    [-0.3, 0.3],
+    [0.3, 0.3],
+  ]) {
+    cyl(p2, 0.27, 0.27, 0.85, 14, dx > 0 ? M.metal : M.orange, dx, 0.57, dz);
+    cyl(p2, 0.28, 0.28, 0.04, 14, M.metalDark, dx, 0.7, dz);
+  }
+  // Spare tanks on saddles, gas-bottle rack, cable drum.
+  for (const z of [5.45, 6.6]) {
+    cyl(g, 0.55, 0.55, 2.4, 16, M.hull, 4.4, 0.85, z, { rz: Math.PI / 2 });
+    for (const s of [-1, 1]) mesh(g, new THREE.SphereGeometry(0.55, 12, 8), M.hull, 4.4 + s * 1.2, 0.85, z, { sv: V3(0.45, 1, 1) });
+    for (const dx of [-0.7, 0.7]) cyl(g, 0.57, 0.57, 0.12, 16, M.hazard, 4.4 + dx, 0.85, z, { rz: Math.PI / 2 });
+  }
+  for (const dx of [-0.8, 0.8]) box(g, 0.25, 0.32, 2.4, M.metalDark, 4.4 + dx, 0.3, 6.0);
+  box(g, 1.5, 0.1, 0.5, M.metalDark, 4.8, 0.19, 9.6);
+  for (const dx of [-0.75, 0.75]) box(g, 0.06, 1.3, 0.06, M.metal, 4.8 + dx, 0.85, 9.85);
+  box(g, 1.56, 0.05, 0.04, M.metal, 4.8, 1.2, 9.86);
+  for (let i = 0; i < 6; i++) {
+    const x = 4.25 + i * 0.22;
+    cyl(g, 0.1, 0.1, 1.3, 10, [M.hazard, M.metal, M.orange][i % 3], x, 0.9, 9.6);
+    cyl(g, 0.04, 0.06, 0.16, 6, M.metalDark, x, 1.63, 9.6);
+  }
+  for (const dz of [-0.45, 0.45]) cyl(g, 0.85, 0.85, 0.08, 20, M.hullDark, 6.6, 0.9, 11.6 + dz, { rx: Math.PI / 2 });
+  cyl(g, 0.62, 0.62, 0.84, 18, M.metalDark, 6.6, 0.9, 11.6, { rx: Math.PI / 2 });
+  cyl(g, 0.12, 0.12, 1.1, 8, M.metal, 6.6, 0.9, 11.6, { rx: Math.PI / 2 });
+  // Floodlight mast aimed into the yard.
+  cyl(g, 0.1, 0.14, 7.5, 8, M.metal, 7.6, 3.89, 12.8);
+  box(g, 0.6, 0.2, 0.6, M.metalDark, 7.6, 0.24, 12.8);
+  box(g, 0.4, 0.6, 0.25, M.hullDark, 7.6, 1.2, 12.56);
+  const heads = new THREE.Group();
+  heads.position.set(7.6, 7.45, 12.8);
+  heads.rotation.y = Math.atan2(-7.6, -12.8);
+  g.add(heads);
+  box(heads, 1.6, 0.1, 0.1, M.metal, 0, 0, 0);
+  for (const dx of [-0.6, 0.6]) {
+    box(heads, 0.5, 0.35, 0.3, M.metalDark, dx, -0.2, 0.12, { rx: 0.45 });
+    box(heads, 0.42, 0.27, 0.04, M.lampHead, dx, -0.27, 0.27, { rx: 0.45, cast: false });
+  }
+  // Perimeter bollards, entrance sign.
+  for (const [x, z] of [
+    [-8.1, -13.1],
+    [8.1, -13.1],
+    [8.1, 2.5],
+    [-8.1, 13.1],
+    [-0.8, 13.1],
+    [5.2, 13.1],
+    [8.4, 8.0],
+  ]) {
+    cyl(g, 0.09, 0.09, 1.0, 8, M.hazard, x, 0.64, z);
+    cyl(g, 0.1, 0.1, 0.2, 8, M.metalDark, x, 1.2, z);
+  }
+  for (const x of [1.4, 3.0]) cyl(g, 0.05, 0.05, 2.0, 6, M.metal, x, 1.0, 14.0);
+  box(g, 2.0, 0.9, 0.06, M.hull, 2.2, 1.55, 14.0);
+  box(g, 2.0, 0.2, 0.07, M.orange, 2.2, 1.95, 14.0);
+  box(g, 2.0, 0.08, 0.07, M.hazard, 2.2, 1.15, 14.0);
+  for (const [y, w] of [
+    [1.72, 1.5],
+    [1.56, 1.2],
+    [1.4, 1.4],
+  ])
+    box(g, w, 0.05, 0.075, M.hullDark, 2.2 - (1.5 - w) / 2, y, 14.0);
+  bakeStatic(g);
+  const hit = hitProxy(g, new THREE.BoxGeometry(17, 9, 27), 4);
+  return {
+    group: g,
+    hit,
+    radius: 15,
+    focus: { distance: 40, height: 3 },
+    footprint: { w: 17, d: 27 },
+    update(t) {
+      trolley.position.x = -5.3 + Math.sin(t * 0.11) * 1.3;
+    },
+  };
+}
+
+/** Propellant plant: electrolysis + Sabatier skids, compressors, cryogenic tank farm, pipe rack. */
+function buildIsru(M) {
+  const g = new THREE.Group();
+  box(g, 23, 0.14, 16, M.sintered, 0, 0.07, 0.5);
+  // Spill-containment bund round the tank farm.
+  for (const z of [-7.25, -0.95]) box(g, 21.8, 0.55, 0.35, M.sintered, 0, 0.42, z);
+  for (const x of [-10.9, 10.9]) box(g, 0.35, 0.55, 6.6, M.sintered, x, 0.42, -4.1);
+  // Horizontal cryogenic tanks on saddles (LOX white, methane in orange foam), with top catwalk.
+  const tank = (mat, x0, x1, z, r, y) => {
+    const L = x1 - x0 - 2 * r * 0.6;
+    const cx = (x0 + x1) / 2;
+    cyl(g, r, r, L, 28, mat, cx, y, z, { rz: Math.PI / 2 });
+    const cap = new THREE.SphereGeometry(r, 24, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+    mesh(g, cap, mat, cx + L / 2, y, z, { rz: -Math.PI / 2, sv: V3(1, 0.6, 1) });
+    mesh(g, cap, mat, cx - L / 2, y, z, { rz: Math.PI / 2, sv: V3(1, 0.6, 1) });
+    const bands = 4;
+    for (let i = 0; i < bands; i++) mesh(g, new THREE.CylinderGeometry(r + 0.03, r + 0.03, 0.14, 28, 1, true), M.metal, cx - L / 2 + ((i + 0.5) / bands) * L, y, z, { rz: Math.PI / 2 });
+    for (const sx of [-0.32, 0, 0.32]) {
+      const x = cx + sx * L;
+      const hS = y - r + 0.11 - 0.14;
+      box(g, 0.45, hS, 2 * r * 0.9, M.metalDark, x, 0.14 + hS / 2, z);
+      box(g, 0.85, 0.22, 2 * r + 0.4, M.sintered, x, 0.25, z);
+    }
+    cyl(g, 0.28, 0.28, 0.35, 12, M.metal, cx - L * 0.25, y + r + 0.1, z);
+    for (const dx of [0.2, 0.5]) cyl(g, 0.05, 0.05, 0.8, 6, M.metal, cx + L * 0.2 + dx, y + r + 0.3, z - 0.3);
+    cyl(g, 0.04, 0.04, 2.6, 6, M.metal, x1 - 0.05, y, z + 0.85);
+    cyl(g, 0.16, 0.16, 0.5, 10, M.metalDark, x1 - 0.1, 0.39, z + 1.2);
+    return { cx, L };
+  };
+  const TY = 2.1;
+  const TR = 1.55;
+  const t1 = tank(M.radiator, -9.35, 0.15, -4.1, TR, TY);
+  const t2 = tank(M.orange, 1.45, 9.55, -4.1, TR, TY);
+  const yC = TY + TR + 0.08;
+  box(g, 18.6, 0.06, 0.8, M.metalDark, 0.1, yC, -4.1);
+  for (const s of [-0.38, 0.38]) {
+    box(g, 18.6, 0.04, 0.04, M.metal, 0.1, yC + 1.0, -4.1 + s);
+    box(g, 18.6, 0.04, 0.04, M.metal, 0.1, yC + 0.5, -4.1 + s);
+    for (let x = -9; x <= 9.4; x += 2.05) box(g, 0.04, 1.0, 0.04, M.metal, x, yC + 0.5, -4.1 + s);
+  }
+  for (const s of [-0.24, 0.24]) box(g, 0.06, yC + 1.0, 0.06, M.metal, 0.8, (yC + 1.0) / 2, -2.25 + s);
+  for (let y = 0.45; y < yC; y += 0.32) box(g, 0.06, 0.035, 0.48, M.metal, 0.8, y, -2.25);
+  box(g, 0.9, 0.06, 1.5, M.metalDark, 0.8, yC, -2.95);
+  // Pipe rack spine (walkable underneath) with process lines and a cable tray.
+  for (const x of [-10, -6, -2, 2, 6, 10]) {
+    box(g, 0.24, 4.3, 0.24, M.metal, x, 2.29, 0.6);
+    box(g, 0.2, 0.2, 2.2, M.metalDark, x, 3.15, 0.6);
+    box(g, 0.2, 0.2, 2.2, M.metalDark, x, 4.25, 0.6);
+    strut(g, V3(x, 2.4, 0.6), V3(x, 3.05, -0.35), 0.05, M.metal);
+    strut(g, V3(x, 2.4, 0.6), V3(x, 3.05, 1.55), 0.05, M.metal);
+    box(g, 0.6, 0.06, 0.6, M.metalDark, x, 0.17, 0.6);
+    for (const [dx, dz] of [
+      [-0.2, -0.2],
+      [0.2, -0.2],
+      [0.2, 0.2],
+      [-0.2, 0.2],
+    ])
+      mesh(g, BOLT, M.metalDark, x + dx, 0.22, 0.6 + dz, { rx: Math.PI / 2 });
+  }
+  const line = (r, mat, y, z) => cyl(g, r, r, 21, 10, mat, 0, y, z, { rz: Math.PI / 2 });
+  line(0.24, M.mli, 4.6, -0.1);
+  line(0.12, M.orange, 4.47, 0.55);
+  line(0.13, M.metal, 4.48, 1.05);
+  line(0.09, M.hazard, 3.34, -0.05);
+  line(0.11, M.metal, 3.36, 0.4);
+  box(g, 21, 0.08, 0.5, M.metalDark, 0, 3.29, 1.25);
+  // Drops: vapour/fill lines from the rack into each tank and the process skids.
+  for (const x of [t1.cx + 1.2, t2.cx - 0.8]) tube(g, [V3(x, 4.6, -0.1), V3(x, 4.6, -1.4), V3(x, 4.15, -2.6), V3(x, 3.55, -3.3)], 0.13, M.mli, { seg: 14, radial: 8 });
+  tube(g, [V3(-7.0, 3.36, 0.4), V3(-7.0, 3.36, 2.2), V3(-7.0, 2.6, 3.4), V3(-7.0, 1.6, 4.4)], 0.1, M.metal, { seg: 12, radial: 6 });
+  tube(g, [V3(0.6, 4.47, 0.55), V3(0.6, 4.3, 2.4), V3(0.6, 2.6, 3.6), V3(0.6, 1.9, 4.6)], 0.11, M.orange, { seg: 12, radial: 6 });
+  tube(g, [V3(4.0, 3.34, -0.05), V3(4.6, 3.3, 2.2), V3(5.0, 3.5, 3.8)], 0.08, M.hazard, { seg: 10, radial: 5 });
+  // Electrolysis + Sabatier skid: reactor columns (one insulated), cell stack with fins, heat exchanger.
+  box(g, 6.6, 0.25, 4.2, M.metalDark, -6.8, 0.27, 5.1);
+  cyl(g, 0.55, 0.55, 5.0, 18, M.hull, -8.8, 2.9, 4.4);
+  mesh(g, new THREE.SphereGeometry(0.55, 16, 6, 0, Math.PI * 2, 0, Math.PI / 2), M.hull, -8.8, 5.4, 4.4, { sv: V3(1, 0.5, 1) });
+  cyl(g, 0.62, 0.62, 1.8, 18, M.mli, -8.8, 2.4, 4.4);
+  for (const y of [1.2, 3.8, 4.9]) cyl(g, 0.58, 0.58, 0.1, 18, M.metal, -8.8, y, 4.4);
+  cyl(g, 0.45, 0.45, 3.6, 16, M.radiator, -7.3, 2.2, 6.0);
+  mesh(g, new THREE.SphereGeometry(0.45, 14, 6, 0, Math.PI * 2, 0, Math.PI / 2), M.radiator, -7.3, 4.0, 6.0, { sv: V3(1, 0.5, 1) });
+  for (const s of [-0.22, 0.22]) box(g, 0.05, 4.6, 0.05, M.metal, -9.55, 2.7, 4.4 + s);
+  for (let y = 0.7; y < 5.0; y += 0.32) box(g, 0.04, 0.035, 0.44, M.metal, -9.55, y, 4.4);
+  for (const y of [1.5, 4.0]) box(g, 0.3, 0.05, 0.05, M.metal, -9.42, y, 4.4);
+  box(g, 2.2, 1.5, 1.6, M.hull, -4.9, 1.15, 4.2);
+  for (let k = 0; k < 8; k++) box(g, 0.04, 1.2, 1.7, M.radiator, -5.8 + k * 0.26, 1.15, 4.2);
+  cyl(g, 0.35, 0.35, 2.6, 14, M.metal, -5.2, 1.1, 6.4, { rz: Math.PI / 2 });
+  for (const dx of [-0.9, 0.9]) box(g, 0.2, 0.7, 0.5, M.metalDark, -5.2 + dx, 0.66, 6.4);
+  // Compressor skid: two housings with motors, coolers and fans; accumulator bottle.
+  box(g, 6.4, 0.25, 4.0, M.metalDark, 0.6, 0.27, 5.1);
+  for (const x of [-1.0, 2.2]) {
+    box(g, 1.9, 1.5, 1.4, M.hull, x, 1.15, 5.5);
+    cyl(g, 0.4, 0.4, 1.3, 14, M.metal, x, 0.85, 4.15, { rx: Math.PI / 2 });
+    box(g, 1.6, 0.3, 1.2, M.radiator, x, 2.05, 5.5);
+    for (const dx of [-0.4, 0.4]) put(g, new THREE.TorusGeometry(0.28, 0.04, 6, 16).rotateX(Math.PI / 2), M.metalDark, V3(x + dx, 2.22, 5.5));
+    for (let k = 0; k < 4; k++) box(g, 1.5, 0.04, 0.03, M.metalDark, x, 0.7 + k * 0.25, 6.21);
+  }
+  cyl(g, 0.3, 0.3, 1.6, 14, M.hazard, 3.3, 1.2, 3.7);
+  mesh(g, new THREE.SphereGeometry(0.3, 12, 6), M.hazard, 3.3, 2.0, 3.7, { sv: V3(1, 0.5, 1) });
+  // Radiator field: two rows of upright panels with manifolds.
+  for (const z of [3.8, 6.4]) {
+    for (const x of [5.6, 7.7, 9.8]) {
+      box(g, 1.9, 2.6, 0.06, M.radiator, x, 2.1, z);
+      for (const y of [0.78, 3.42]) cyl(g, 0.06, 0.06, 1.95, 6, M.metal, x, y, z, { rz: Math.PI / 2 });
+      for (const dx of [-0.85, 0.85]) box(g, 0.08, 0.7, 0.08, M.metal, x + dx, 0.49, z);
+    }
+    cyl(g, 0.08, 0.08, 6.4, 8, M.metalDark, 7.7, 3.55, z, { rz: Math.PI / 2 });
+  }
+  // Vent stack with guy wires and an aviation light.
+  cyl(g, 0.2, 0.24, 9, 10, M.metal, 11.6, 4.64, 1.2);
+  cyl(g, 0.32, 0.28, 0.5, 10, M.metalDark, 11.6, 9.35, 1.2);
+  for (const [ax, az] of [
+    [15.1, 1.2],
+    [11.0, 4.65],
+    [11.0, -2.25],
+  ]) {
+    strut(g, V3(11.6, 6.5, 1.2), V3(ax, 0.3, az), 0.015, M.metalDark, { seg: 3 });
+    box(g, 0.5, 0.3, 0.5, M.sintered, ax, 0.29, az);
+  }
+  const stackLight = mesh(g, new THREE.SphereGeometry(0.12, 8, 6), M.beaconRed, 11.6, 9.7, 1.2, { cast: false, dynamic: true });
+  // Elevated pipe bridge to the ice/water plant next door.
+  const b0x = 10.2;
+  const b1 = V3(P.water.x - 7 * Math.cos(0.2) + 0.6 * Math.sin(0.2) - P.isru.x, 2.6, P.water.z + 7 * Math.sin(0.2) + 0.6 * Math.cos(0.2) - P.isru.z);
+  for (const [dz, r, mat, y0] of [
+    [-0.15, 0.11, M.metal, 3.36],
+    [0.15, 0.09, M.orange, 3.34],
+  ])
+    strut(g, V3(b0x, y0, 0.4 + dz), V3(b1.x - 0.3, b1.y, b1.z + dz), r, mat, { seg: 8 });
+  for (const x of [14, 19]) {
+    const k = (x - b0x) / (b1.x - 0.3 - b0x);
+    const y = 3.35 + (b1.y - 3.35) * k - 0.15;
+    const z = 0.4 + (b1.z - 0.4) * k;
+    box(g, 0.2, y, 0.2, M.metal, x, y / 2, z);
+    box(g, 0.2, 0.12, 1.0, M.metalDark, x, y, z);
+    box(g, 0.5, 0.06, 0.5, M.metalDark, x, 0.03, z);
+  }
+  // Control cabinet with lamp.
+  box(g, 0.8, 1.7, 0.55, M.hull, -11.2, 0.99, 8.0);
+  box(g, 0.02, 1.5, 0.5, M.metalDark, -10.79, 0.99, 8.0);
+  box(g, 0.9, 0.08, 0.65, M.metalDark, -11.2, 1.88, 8.0);
+  lamp(g, M, V3(-11.2, 2.05, 8.45), 0, 0.5);
+  lamp(g, M, V3(0.1, yC + 1.4, -4.1), 0, 0.6);
+  bakeStatic(g);
+  const hit = hitProxy(g, new THREE.BoxGeometry(24, 10, 17), 4);
+  return {
+    group: g,
+    hit,
+    radius: 13,
+    focus: { distance: 36, height: 3 },
+    footprint: { w: 24, d: 17 },
+    update(t) {
+      stackLight.visible = t % 2.0 < 0.25;
+    },
+  };
+}
+
+/** Geoscience field station: hard-shell lab pod, seismometer shield, weather mast, core drill. */
+function buildFieldLab(M) {
+  const g = new THREE.Group();
+  const rand = mulberry32(57);
+  const PR = 2.1;
+  const PL = 7;
+  const PY = 3.0;
+  const PX = -0.2;
+  const inR = PR * Math.cos(Math.PI / 8);
+  // Octagonal hard-shell pod on four screw jacks.
+  const pod = prismGeo(PR, PL, 8, Math.PI / 8).rotateZ(Math.PI / 2);
+  mesh(g, pod, M.hull, PX, PY, 0);
+  for (const x of [PX - PL / 2 + 0.1, PX + PL / 2 - 0.1]) mesh(g, prismGeo(PR + 0.12, 0.32, 8, Math.PI / 8).rotateZ(Math.PI / 2), M.hazard, x, PY, 0);
+  for (const x of [PX - 1.2, PX + 1.2]) mesh(g, prismGeo(PR + 0.05, 0.14, 8, Math.PI / 8).rotateZ(Math.PI / 2), M.metalDark, x, PY, 0);
+  const yB = PY - inR;
+  for (const x of [PX - 2.6, PX + 2.6]) {
+    for (const z of [-0.65, 0.65]) {
+      box(g, 0.2, yB - 0.1, 0.2, M.metal, x, (yB - 0.1) / 2 + 0.1, z);
+      cyl(g, 0.15, 0.15, 0.2, 10, M.metalDark, x, 0.55, z);
+      box(g, 0.6, 0.1, 0.6, M.metalDark, x, 0.05, z);
+    }
+    strut(g, V3(x, 0.2, -0.65), V3(x, yB - 0.05, 0.65), 0.035, M.metal);
+  }
+  box(g, 2.4, 0.55, 1.4, M.hullDark, PX, yB - 0.27, 0);
+  // Windows on both long faces.
+  for (const [x, s] of [
+    [-2.6, -1],
+    [-1.3, -1],
+    [0.0, -1],
+    [-2.0, 1],
+    [-0.7, 1],
+  ]) {
+    box(g, 1.0, 0.62, 0.1, M.window, PX + x, PY + 0.25, s * (inR + 0.03), { cast: false });
+    box(g, 1.2, 0.82, 0.05, M.metalDark, PX + x, PY + 0.25, s * (inR + 0.005));
+  }
+  // Door, porch, steps and handrails at the east end.
+  const xe = PX + PL / 2 + 0.06;
+  box(g, 0.06, 1.9, 1.15, M.metal, xe + 0.02, 2.15, 0);
+  box(g, 0.1, 1.7, 0.95, M.metalDark, xe + 0.07, 2.15, 0);
+  box(g, 0.04, 0.12, 0.3, M.metal, xe + 0.14, 2.15, 0.3);
+  box(g, 1.8, 0.1, 2.0, M.metalDark, PX + PL / 2 + 0.95, 1.25, 0);
+  for (const dx of [0.1, 1.75]) for (const z of [-0.9, 0.9]) box(g, 0.08, 1.2, 0.08, M.metal, PX + PL / 2 + dx, 0.6, z);
+  for (const z of [-0.95, 0.95]) {
+    cyl(g, 0.03, 0.03, 1.0, 5, M.metal, PX + PL / 2 + 1.8, 1.8, z);
+    box(g, 1.7, 0.04, 0.04, M.metal, PX + PL / 2 + 0.95, 2.3, z);
+    tube(g, [V3(PX + PL / 2 + 1.8, 2.3, z * 0.58), V3(PX + PL / 2 + 3.2, 1.2, z * 0.58)], 0.03, M.metal, { seg: 4, radial: 4 });
+  }
+  [0.9, 0.6, 0.3].forEach((h, i) => box(g, 0.4, h, 1.0, M.metalDark, PX + PL / 2 + 2.05 + i * 0.4, h / 2, 0));
+  lamp(g, M, V3(xe + 0.15, 3.35, 0), Math.PI / 2, 0.6);
+  lamp(g, M, V3(PX - 1.2, PY + 1.7, -inR - 0.25), 0, 0.6);
+  // Roof: radiator, tilted solar panel, antenna, vents.
+  const yR = PY + inR;
+  box(g, 3.0, 0.05, 1.5, M.radiator, PX - 1.6, yR + 0.42, 0);
+  box(g, 2.0, 0.05, 1.3, M.solar, PX + 1.6, yR + 0.5, 0.1, { rx: 0.35 });
+  for (const [x, z] of [
+    [-2.9, -0.6],
+    [-0.3, -0.6],
+    [-2.9, 0.6],
+    [-0.3, 0.6],
+    [0.8, -0.4],
+    [2.4, -0.4],
+    [0.8, 0.5],
+    [2.4, 0.5],
+  ])
+    cyl(g, 0.04, 0.04, 0.42, 5, M.metal, PX + x, yR + 0.21, z);
+  cyl(g, 0.03, 0.03, 1.8, 5, M.metal, PX + 2.9, yR + 0.9, -0.62);
+  box(g, 0.25, 0.25, 0.2, M.hullDark, PX + 2.9, yR + 0.12, -0.62);
+  for (const x of [-3.2, 3.0]) box(g, 0.35, 0.22, 0.35, M.metalDark, PX + x, yR + 0.11, 0.55);
+  // Seismometer under a gold-foil wind & thermal shield, tethered to the pod.
+  cyl(g, 1.35, 1.45, 0.14, 20, M.sintered, -6.0, 0.07, 3.8);
+  mesh(g, new THREE.SphereGeometry(0.95, 20, 8, 0, Math.PI * 2, 0, Math.PI / 2), M.foil, -6.0, 0.18, 3.8, { sv: V3(1, 0.8, 1) });
+  cyl(g, 1.02, 1.04, 0.12, 20, M.hullDark, -6.0, 0.2, 3.8);
+  tube(g, [V3(-5.0, 0.1, 3.4), V3(-4.0, 0.06, 2.4), V3(-2.8, 0.12, 0.7)], 0.03, M.metalDark, { seg: 10, radial: 4 });
+  // Weather mast: booms with sensors, logger, guy wires, spinning anemometer.
+  box(g, 0.9, 0.18, 0.9, M.sintered, -6.8, 0.09, -3.0);
+  cyl(g, 0.06, 0.08, 8.0, 8, M.metal, -6.8, 4.18, -3.0);
+  for (const y of [2.0, 4.5, 7.2]) {
+    box(g, 1.3, 0.05, 0.05, M.metal, -6.15, y, -3.0);
+    box(g, 0.22, 0.16, 0.16, M.hull, -5.5, y, -3.0);
+    for (let k = 0; k < 4; k++) cyl(g, 0.09, 0.09, 0.03, 10, M.hull, -5.5, y - 0.15 - k * 0.06, -3.0);
+  }
+  box(g, 0.45, 0.6, 0.3, M.hull, -6.8, 1.1, -2.75);
+  box(g, 0.6, 0.4, 0.03, M.solar, -6.8, 3.2, -2.75, { rx: 0.5 });
+  for (const [ax, az] of [
+    [-6.8, 0.0],
+    [-9.2, -4.4],
+    [-4.4, -4.4],
+  ]) {
+    strut(g, V3(-6.8, 5.5, -3.0), V3(ax, 0.2, az), 0.012, M.metalDark, { seg: 3 });
+    box(g, 0.3, 0.2, 0.3, M.sintered, ax, 0.1, az);
+  }
+  const anemo = new THREE.Group();
+  anemo.position.set(-6.8, 8.3, -3.0);
+  anemo.userData.dynamic = true;
+  for (let k = 0; k < 3; k++) {
+    const a = (k / 3) * Math.PI * 2;
+    mesh(anemo, new THREE.BoxGeometry(0.6, 0.03, 0.03), M.metal, Math.cos(a) * 0.3, 0, Math.sin(a) * 0.3, { ry: -a });
+    mesh(anemo, new THREE.SphereGeometry(0.09, 8, 6), M.hull, Math.cos(a) * 0.6, 0, Math.sin(a) * 0.6);
+  }
+  bakeStatic(anemo);
+  g.add(anemo);
+  // Core racks: shelves of core liners under a sun cover.
+  for (const x of [-2.35, -0.05]) for (const z of [4.5, 5.1]) box(g, 0.06, 1.5, 0.06, M.metal, x, 0.75, z);
+  for (const y of [0.35, 0.8, 1.25]) {
+    box(g, 2.4, 0.04, 0.65, M.metalDark, -1.2, y, 4.8);
+    for (let i = 0; i < 4; i++) cyl(g, 0.05, 0.05, 2.1 - rand() * 0.4, 8, M.metal, -1.2 + (rand() - 0.5) * 0.15, y + 0.07, 4.6 + i * 0.13, { rz: Math.PI / 2 });
+  }
+  box(g, 2.6, 0.04, 0.9, M.hullDark, -1.2, 1.56, 4.8, { rx: 0.12 });
+  // Core drill: tripod derrick, drill string, rotary head, power unit, pipe rack.
+  box(g, 3.6, 0.12, 3.6, M.sintered, 5.8, 0.06, 5.2);
+  const apex = V3(5.8, 6.2, 5.2);
+  for (const a of [Math.PI / 2, (7 * Math.PI) / 6, (11 * Math.PI) / 6]) {
+    const f = V3(5.8 + Math.cos(a) * 1.6, 0.12, 5.2 + Math.sin(a) * 1.6);
+    strut(g, f, apex, 0.07, M.metal, { seg: 6 });
+    box(g, 0.4, 0.08, 0.4, M.metalDark, f.x, 0.16, f.z);
+  }
+  box(g, 0.5, 0.4, 0.5, M.hazard, 5.8, 6.3, 5.2);
+  cyl(g, 0.06, 0.06, 5.6, 8, M.metal, 5.8, 3.0, 5.2);
+  box(g, 0.55, 0.6, 0.55, M.metalDark, 5.8, 2.4, 5.2);
+  cyl(g, 0.16, 0.16, 0.5, 10, M.hazard, 6.15, 2.5, 5.2, { rz: Math.PI / 2 });
+  cyl(g, 0.22, 0.26, 0.4, 12, M.metalDark, 5.8, 0.32, 5.2);
+  box(g, 1.2, 1.0, 0.9, M.hull, 8.0, 0.62, 3.4, { ry: 0.3 });
+  box(g, 1.22, 0.1, 0.92, M.hazard, 8.0, 1.0, 3.4, { ry: 0.3 });
+  tube(g, [V3(7.5, 0.9, 3.7), V3(6.8, 0.3, 4.4), V3(6.0, 2.3, 5.0)], 0.035, M.metalDark, { seg: 10, radial: 4 });
+  for (const x of [2.2, 3.8]) {
+    strut(g, V3(x, 0.12, 6.6), V3(x, 0.75, 7.0), 0.04, M.metal);
+    strut(g, V3(x, 0.12, 7.4), V3(x, 0.75, 7.0), 0.04, M.metal);
+  }
+  for (let i = 0; i < 6; i++) cyl(g, 0.05, 0.05, 2.6, 8, M.metal, 3.0, 0.82 + (i % 2) * 0.09, 6.85 + i * 0.06, { rz: Math.PI / 2 });
+  // Survey flags and paver walkway toward the main habitat airlock.
+  for (const [x, z] of [
+    [-9.0, -5.5],
+    [-9.4, 6.0],
+    [9.6, -2.2],
+    [8.8, 8.0],
+    [-3.0, 8.4],
+  ]) {
+    cyl(g, 0.02, 0.02, 1.5, 4, M.metal, x, 0.75, z);
+    box(g, 0.32, 0.18, 0.01, M.hazard, x + 0.16, 1.38, z);
+  }
+  for (let i = 0; i < 10; i++) {
+    const k = i / 9;
+    const x = 2.4 + k * 4.6 - Math.sin(k * Math.PI) * 0.6 + (rand() - 0.5) * 0.15;
+    const z = -13 + k * 11.6;
+    box(g, 1.3, 0.07, 0.9, M.sintered, x, 0.035, z, { ry: Math.atan2(4.6, 11.6) + (rand() - 0.5) * 0.12 });
+  }
+  bakeStatic(g);
+  const hit = hitProxy(g, new THREE.BoxGeometry(18, 9, 14), 3.5);
+  return {
+    group: g,
+    hit,
+    radius: 10,
+    focus: { distance: 28, height: 3 },
+    footprint: { w: 18, d: 14 },
+    update(t, env, sim) {
+      anemo.rotation.y += 0.05 + (sim?.flows?.tau ?? 0.5) * 0.02;
+    },
+  };
+}
+
 function buildTunnel(M, a, b, y, r) {
   const g = new THREE.Group();
   const A = V3(a.x, y, a.z);
@@ -917,7 +1772,9 @@ function lampPositions() {
     const a = (k / 10) * Math.PI * 2;
     pts.push([Math.cos(a) * 22, Math.sin(a) * 22]);
   }
-  return pts;
+  // Drop any lamp that would stand inside or against an expansion structure.
+  const solid = [...Object.values(STRUCTURE_COLLIDERS).flat(), ...LINK_COLLIDERS];
+  return pts.filter(([x, z]) => !solid.some((c) => Math.hypot(x - c.x, z - c.z) < c.r + 1.2));
 }
 
 function buildLamps(M) {
@@ -1031,6 +1888,10 @@ export function buildSettlement(quality) {
     garage: buildGarage,
     landing: buildLanding,
     fission: buildFission,
+    habitatB: buildHabitatB,
+    yard: buildYard,
+    isru: buildIsru,
+    fieldlab: buildFieldLab,
   };
   const structures = {};
   const rot = { water: 0.2, battery: Math.PI / 2, comms: 0.4 };
@@ -1057,6 +1918,17 @@ export function buildSettlement(quality) {
     buildTunnel(M, { x: 3, z: -9.6 }, { x: 3, z: -28.6 }, 1.8, 1.15),
     buildTunnel(M, { x: 7.5, z: 6.5 }, { x: 31, z: 13 }, 1.7, 1.0),
   ];
+  // Bellows tunnel: main habitat wall → Habitat B docking collar.
+  {
+    const dx = P.habitatB.x - P.habitat.x;
+    const dz = P.habitatB.z - P.habitat.z;
+    const d = Math.hypot(dx, dz);
+    const ux = dx / d;
+    const uz = dz / d;
+    const a = { x: P.habitat.x + ux * 9.4, z: P.habitat.z + uz * 9.4 };
+    const b = { x: P.habitatB.x - ux * 5.5, z: P.habitatB.z - uz * 5.5 };
+    tunnels.push(buildBellows(M, a, b, 2.4, 1.15));
+  }
   for (const t of tunnels) {
     bakeStatic(t);
     root.add(t);
@@ -1094,6 +1966,13 @@ export function buildSettlement(quality) {
   });
   const pools = lamps.pts.map(([x, z]) => ({ x, z, w: 11, d: 11, y: 0.12 }));
   pools.push({ x: 0, z: 18.5, w: 9, d: 9, y: 0.3 }, { x: 36, z: 27, w: 10, d: 10, y: 0.25 }, { x: 22, z: -34, w: 8, d: 8, y: 0.2 });
+  // Expansion: Habitat B airlock, yard shelter, propellant-plant cabinet, field-station porch.
+  pools.push(
+    { x: P.habitatB.x + 6.2, z: P.habitatB.z + 7.4, w: 8, d: 8, y: 0.2 },
+    { x: P.yard.x + 3.5, z: P.yard.z - 5.5, w: 12, d: 12, y: 0.2 },
+    { x: P.isru.x - 11.2, z: P.isru.z + 8.6, w: 7, d: 7, y: 0.2 },
+    { x: P.fieldlab.x + 6.0, z: P.fieldlab.z, w: 8, d: 8, y: 0.12 }
+  );
   for (let k = 0; k < 6; k++) {
     const a = (k / 6) * Math.PI * 2 + 0.5;
     pools.push({ x: Math.sin(a) * 14.6, z: Math.cos(a) * 14.6, w: 8, d: 8, y: 0.14 });

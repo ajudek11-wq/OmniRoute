@@ -2158,3 +2158,100 @@ input[type="range"]::-moz-range-thumb {
     display: grid;
   }
 }
+
+/* ═══ V4: manual rover driving ═══════════════════════════════════ */
+.drive-hud {
+  position: absolute;
+  z-index: 19;
+  top: calc(var(--safe-t) + 94px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: rgba(16, 12, 11, 0.55);
+  border: 1px solid rgba(255, 236, 218, 0.14);
+  pointer-events: none;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+.drive-hud[hidden] {
+  display: none;
+}
+.drive-hud b {
+  font-size: 17px;
+  font-weight: 700;
+  min-width: 2.6em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.drive-hud span {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(255, 236, 218, 0.65);
+}
+.drive-hud i {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: #1a0d06;
+  background: var(--mars);
+}
+.drive-btn {
+  position: absolute;
+  z-index: 17;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--safe-b) + var(--dock-h) + 116px);
+  height: 44px;
+  padding: 0 16px 0 12px;
+  border-radius: 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 14px;
+  animation: actIn 0.35s var(--ease) both;
+}
+.drive-btn[hidden] {
+  display: none;
+}
+.drive-btn i {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--mars);
+}
+.drive-btn:active {
+  transform: translateX(-50%) scale(0.96);
+}
+.walking .drive-btn,
+.sheet-open .drive-btn,
+.mastcam .drive-btn {
+  display: none;
+}
+/* At the wheel: no sprint; the exit button takes the corner. */
+.driving .sprint-btn {
+  display: none;
+}
+.driving .act-btn {
+  right: calc(var(--safe-r) + 16px);
+}
+@media (max-height: 500px) and (orientation: landscape) {
+  .drive-btn {
+    bottom: calc(var(--safe-b) + var(--dock-h) + 56px);
+  }
+}
+/* On foot or at the wheel, the menu also brings back the view bar: one tap returns to Orbit. */
+.walking.menu-open .views {
+  display: flex !important;
+  z-index: 31;
+}

@@ -4,6 +4,7 @@ import { resolveQuality, FrameGovernor, isMobileDevice, rememberPerf } from "./c
 import { createWorld } from "./scene/world.js";
 import { buildTerrain, buildRocks, buildPaths, heightAt } from "./scene/terrain.js";
 import { buildSettlement, PANEL_AREA } from "./scene/settlement.js";
+import { createAmbient } from "./scene/ambient.js";
 import { Rover, ROVER_PARTS } from "./scene/rover.js";
 import { CameraRig, CAMERA_MODES } from "./scene/cameraRig.js";
 import { Cinematic } from "./scene/cinematic.js";
@@ -16,6 +17,7 @@ import { placeLandmarks, buildSamples } from "./scene/landmarks.js";
 import { canyonCut } from "./scene/terrain.js";
 import { OBSTACLES } from "./data/layout.js";
 import { wrapAngle } from "./walk/movement.js";
+import { stepRover, driveState, exitSpot, DRIVE } from "./walk/drive.js";
 import { ICONS } from "./ui/icons.js";
 import { configureSurfaces, loadGroundSets, terrainMaterial, rockMaterial, installAtmosphere } from "./scene/surfaces.js";
 import { SOL_SECONDS } from "./sim/constants.js";
@@ -72,8 +74,8 @@ export const LIGHT_PRESETS = [
   { id: "blue", label: "Blue hour", frac: 0.762, hint: "Sun just below the horizon · blue glow" },
   { id: "night", label: "Night", frac: 0.9, hint: "Settlement lighting, stars, Earth" },
 ];
-const STRUCTURE_NAMES = { habitat: "Crew Habitat", lab: "Science Laboratory", greenhouse: "Greenhouse", solar: "Solar Field", battery: "Energy Storage", comms: "Communications", water: "Water & ISRU Plant", garage: "Rover Garage", landing: "Landing Zone", fission: "Fission Surface Power" };
-const LABEL_HEIGHT = { habitat: 15.5, lab: 10.5, greenhouse: 8.5, solar: 7, battery: 5.5, comms: 18, water: 9, garage: 8.5, landing: 19, fission: 10 };
+const STRUCTURE_NAMES = { habitat: "Crew Habitat", lab: "Science Laboratory", greenhouse: "Greenhouse", solar: "Solar Field", battery: "Energy Storage", comms: "Communications", water: "Water & ISRU Plant", garage: "Rover Garage", landing: "Landing Zone", fission: "Fission Surface Power", habitatB: "Habitat B", yard: "Maintenance Yard", isru: "Propellant Plant", fieldlab: "Geoscience Field Station" };
+const LABEL_HEIGHT = { habitat: 15.5, lab: 10.5, greenhouse: 8.5, solar: 7, battery: 5.5, comms: 18, water: 9, garage: 8.5, landing: 19, fission: 10, habitatB: 14, yard: 10, isru: 11, fieldlab: 10 };
 
 const storage = {
   get(key) {
@@ -163,11 +165,13 @@ class App {
       await progress(0.6, "Constructing settlement");
       this.settlement = buildSettlement(this.quality);
       scene.add(this.settlement.root);
+      this.ambient = createAmbient({ scene, settlement: this.settlement, world: this.world, quality: this.quality });
       this.maxPanels = this.settlement.structures.solar.maxPanels;
 
       await progress(0.74, "Deploying exploration rover");
       this.rover = new Rover(this.settlement.materials);
       scene.add(this.rover.root);
+      scene.add(this.rover.dust.points);
       this.landmarkColliders = placeLandmarks(sets, scene);
       this.samples = buildSamples();
       this.samples.group.visible = false;
@@ -180,7 +184,11 @@ class App {
       this.rig = new CameraRig(camera, canvas);
       this.walker = new Walker(camera);
       this.walker.sens = this.settings.lookSens;
-      this.walker.setColliders([...OBSTACLES, ...this.landmarkColliders, ...this.rockColliders]);
+      // Static colliders are shared by the walker and the driven rover; the walker also bumps
+      // into the rover itself (a moving circle updated every frame).
+      this.staticColliders = [...OBSTACLES, ...this.landmarkColliders, ...this.rockColliders];
+      this.roverCollider = { x: this.rover.pos.x, z: this.rover.pos.z, r: 2.3 };
+      this.walker.setColliders([...this.staticColliders, this.roverCollider]);
       this.rig.reduceMotion = this.settings.reduceMotion;
       this.governor = new FrameGovernor(this.renderer, this.quality, { degrade: (stage) => this.degrade(stage) });
       this.cinematic = new Cinematic(this);
@@ -263,6 +271,7 @@ class App {
       this.world.scene.traverse((o) => {
         if (o.isPoints && o.material.size < 1) o.visible = false;
       });
+      this.ambient?.degrade();
       rememberPerf("low");
     } else return;
     this.hud.toast("Graphics adjusted", "Automatic quality reduced effects to keep the view smooth.", "info", 3500);
@@ -412,7 +421,7 @@ class App {
 
   /** Project labels, then greedily place them by priority so none overlap the HUD or each other. */
   updateLabels() {
-    if (this.walker?.active) {
+    if (this.walker?.active || this.driving) {
       for (const L of this.labels) {
         if (L.visible) {
           L.visible = false;
@@ -586,6 +595,7 @@ class App {
       return;
     }
     if ((this.rig.mode === "rover" || firstPerson) && terrainHit) {
+      if (this.manualBlocked()) return;
       const p = terrainHit.point;
       if (this.roverTask && this.roverTask.type !== "manual") this.hud.toast("Task cancelled", "Manual drive command overrides the rover's task.", "warn", 2600);
       this.roverTask = { type: "manual" };
@@ -639,6 +649,7 @@ class App {
         this.audio.tap();
         break;
       case "rover-home":
+        if (this.manualBlocked()) break;
         this.roverTask = { type: "home" };
         this.rover.driveTo(ROVER_HOME.x, ROVER_HOME.z, "Returning to garage", () => {
           this.rover.task = "Parked at garage · charging";
@@ -786,6 +797,14 @@ class App {
 
   setMode(mode) {
     if (this.cinematic?.active) this.toggleCinematic(false);
+    if (mode === "drive") {
+      this.enterDrive();
+      return;
+    }
+    if (this.driving) {
+      this.exitDrive(mode);
+      return;
+    }
     if (mode === "walk") {
       this.enterWalk();
       return;
@@ -796,6 +815,7 @@ class App {
     }
     this.rig.setMode(mode, this.rover);
     this.hud.setMode(mode);
+    this.showDriveButton(mode);
     document.getElementById("app").classList.toggle("mastcam", mode === "mastcam");
     if (mode !== "mastcam") this.world.resize();
     this.audio.tap();
@@ -816,8 +836,16 @@ class App {
       knob: $("joy-knob"),
       onTap: (x, y) => this.walkTap(x, y),
       onInteract: () => this.interactNearest(),
-      isActive: () => this.walker.active,
+      isActive: () => this.walker.active || this.driving,
     });
+    // While driving, the same stick/keys/drags feed this adaptor instead of the walker.
+    this.driveIn = {
+      input: { mx: 0, mz: 0, sprint: false, lookX: 0, lookY: 0 },
+      look: (dx, dy) => this.driveLook(dx, dy),
+    };
+    this.exitAct = { id: "exit-rover", label: "Exit rover", icon: ICONS.walk, act: () => this.exitDrive("walk") };
+    $("btn-drive").innerHTML = `<i>${ICONS.rover}</i><span>Drive manually</span>`;
+    $("btn-drive").addEventListener("click", () => this.setMode("drive"));
     $("btn-sprint").innerHTML = "";
     $("btn-sprint").addEventListener("click", (e) => {
       const on = this.walkCtl.toggleSprint();
@@ -852,7 +880,11 @@ class App {
       { id: "comms", label: "Transmit", icon: ICONS.signal, x: -42, z: 29.5, r: 5, act: () => this.actTransmit() },
       { id: "solar", label: "Clean panels", icon: ICONS.panel, x: 84, z: 6, r: 5, act: () => this.actClean() },
       { id: "garage", label: "Recall rover", icon: ICONS.rover_, x: 36, z: 27, r: 5, act: () => this.action("rover-home") },
-      { id: "rover", label: "Drive rover", icon: ICONS.rover, dyn: true, r: 4.5, act: () => this.setMode("rover") },
+      { id: "habB-airlock", label: "Cycle airlock", icon: ICONS.door, x: 30.2, z: -4.6, r: 4.5, act: () => this.actInspect("habitatB", 30.2, -4.6, "Habitat B airlock cycling. Suitports ready.") },
+      { id: "yard", label: "Inspect spares", icon: ICONS.inspect, x: 62, z: -14, r: 5, act: () => this.actInspect("yard", 62, -14) },
+      { id: "isru", label: "Check plant", icon: ICONS.inspect, x: -60, z: -18, r: 5, act: () => this.actInspect("isru", -60, -18) },
+      { id: "fieldlab", label: "Read seismometer", icon: ICONS.scan, x: 4.6, z: 45, r: 4.5, act: () => this.actInspect("fieldlab", 4.6, 45, "Seismometer recording. Background noise is mostly wind on the shield.") },
+      { id: "rover", label: "Drive rover", icon: ICONS.rover, dyn: true, r: 4.5, act: () => this.setMode("drive") },
       ...SAMPLES.map((s) => ({
         id: `sample-${s.id}`,
         label: s.name,
@@ -879,13 +911,16 @@ class App {
     this.discoverShown = -1;
   }
 
-  enterWalk() {
+  enterWalk(spot = null) {
     if (this.walker.active) return;
     this.sheet.close();
     const $ = (id) => document.getElementById(id);
+    this.leaveMastcam();
     this.rig.controls.enabled = false;
     this.rig.mode = "walk";
-    this.walker.enter(WALK_START.x, WALK_START.z, Math.atan2(0 - WALK_START.x, 0 - WALK_START.z));
+    if (spot) this.walker.enter(spot.x, spot.z, spot.yaw);
+    else this.walker.enter(WALK_START.x, WALK_START.z, Math.atan2(0 - WALK_START.x, 0 - WALK_START.z));
+    this.showDriveButton("walk");
     this.hud.setMode("walk");
     document.getElementById("app").classList.add("walking");
     $("walk-ui").hidden = false;
@@ -895,16 +930,44 @@ class App {
     $("btn-menu").hidden = false;
     this.discoverShown = -1;
     this.missions.emit({ type: "walk" }, this.ctx());
-    this.hud.toast("On foot", "Drag the left side to walk, the right side to look.", "info", 4200);
+    if (spot?.fromRover) this.hud.toast("On foot", "You climbed out beside FR-1. Walk up to it to drive again.", "info", 3600);
+    else this.hud.toast("On foot", "Drag the left side to walk, the right side to look.", "info", 4200);
     this.audio.tap();
   }
 
   exitWalk(mode = "orbit") {
     if (!this.walker.active) return;
-    const $ = (id) => document.getElementById(id);
     // Keep the orbit pivot in front of the walker so the camera flies out from where it stands.
     const f = this.walker.forward();
     this.rig.controls.target.copy(this.world.camera.position).addScaledVector(f, 8);
+    this.teardownWalk();
+    this.flyOut(mode);
+  }
+
+  /** Hand the camera back to the orbit rig and fly to a view mode. */
+  flyOut(mode) {
+    this.rig.controls.enabled = true;
+    this.rig.mode = "none";
+    this.rig.setMode(mode, this.rover, { duration: 1.6 });
+    this.hud.setMode(mode);
+    this.showDriveButton(mode);
+    document.getElementById("app").classList.toggle("mastcam", mode === "mastcam");
+    if (mode !== "mastcam") this.world.resize();
+  }
+
+  /** Drop out of the first-person Mastcam view (restores the FOV) before another camera takes over. */
+  leaveMastcam() {
+    if (this.rig.mode !== "mastcam") return;
+    const cam = this.world.camera;
+    cam.fov = this.rig.baseFov;
+    cam.updateProjectionMatrix();
+    document.getElementById("app").classList.remove("mastcam");
+    this.world.resize();
+  }
+
+  /** Walking UI and walker off, without touching the camera (used when climbing into the rover). */
+  teardownWalk() {
+    const $ = (id) => document.getElementById(id);
     this.walker.exit();
     this.walkCtl.reset();
     this.nearAct = null;
@@ -916,10 +979,212 @@ class App {
     $("discover").hidden = true;
     $("btn-menu").hidden = true;
     $("btn-sprint").classList.remove("on");
-    this.rig.controls.enabled = true;
-    this.rig.mode = "none";
-    this.rig.setMode(mode, this.rover, { duration: 1.6 });
-    this.hud.setMode(mode);
+  }
+
+  // ── Driving the rover (third-person chase camera) ─────────────
+  /** Rover-related commands that the autopilot would run are refused while the player drives. */
+  manualBlocked() {
+    if (!this.driving) return false;
+    this.hud.toast("Manual drive", "Exit the rover to hand it back to the autopilot.", "warn", 2600);
+    return true;
+  }
+
+  showDriveButton(mode) {
+    const b = document.getElementById("btn-drive");
+    if (b) b.hidden = !(mode === "rover" || mode === "roverInspect") || this.driving;
+  }
+
+  enterDrive() {
+    if (this.driving || !this.started) return;
+    if (this.cinematic?.active) this.toggleCinematic(false);
+    const $ = (id) => document.getElementById(id);
+    const r = this.rover;
+    const cam = this.world.camera;
+    this.sheet.close();
+    if (this.roverTask) {
+      if (this.roverTask.type !== "manual" && this.roverTask.type !== "home") this.hud.toast("Task cancelled", "You took the wheel. The rover's task was abandoned.", "warn", 2600);
+      this.roverTask = null;
+    }
+    const fromWalk = this.walker.active;
+    if (fromWalk) this.teardownWalk();
+    this.leaveMastcam();
+    r.setManual(true);
+    if (this.waypoint) this.waypoint.visible = false;
+    this.driving = true;
+    this.drive = { st: driveState(r.pos.x, r.pos.z, r.heading, Math.max(-DRIVE.maxReverse, Math.min(DRIVE.maxSpeed, r.speed))), exiting: false, wasBlocked: false, hudT: 0 };
+    // Take the camera from the orbit rig; the chase camera starts where the view is now.
+    const rig = this.rig;
+    rig.transition = null;
+    rig.follow = null;
+    rig.controls.enabled = false;
+    rig.controls.autoRotate = false;
+    rig.mode = "drive";
+    const dir = cam.getWorldDirection(new THREE.Vector3());
+    this.driveCam = {
+      pos: cam.position.clone(),
+      look: cam.position.clone().addScaledVector(dir, fromWalk ? 4 : 12),
+      yawSm: r.heading,
+      yawOff: 0,
+      pitchOff: 0,
+      lastLook: -1e9,
+      blend: 0,
+      desired: new THREE.Vector3(),
+      aim: new THREE.Vector3(),
+    };
+    this.walkCtl.setTarget(this.driveIn);
+    // Minimal HUD: stick, exit button, compass, location, speed.
+    const app = $("app");
+    app.classList.add("walking", "driving");
+    $("walk-ui").hidden = false;
+    $("compass").hidden = false;
+    $("loc").hidden = false;
+    $("discover").hidden = true;
+    $("btn-menu").hidden = false;
+    $("drive-hud").hidden = false;
+    this.nearAct = this.exitAct;
+    $("btn-act").hidden = false;
+    $("act-label").textContent = this.exitAct.label;
+    $("act-icon").innerHTML = this.exitAct.icon;
+    this.hud.setMode("drive");
+    this.showDriveButton("drive");
+    this.audio.setDriving(true);
+    this.audio.driveStart();
+    if (!this.settings.seenManualDrive) {
+      this.settings.seenManualDrive = true;
+      this.saveSettings();
+      this.hud.toast("Driving FR-1", "Left stick: up to drive, sideways to steer. Drag the right side to look around.", "info", 5200);
+    } else this.hud.toast("Driving FR-1", "", "info", 1800);
+  }
+
+  /** Leave the driver's seat. On foot ("walk") the rover brakes to a stop first. */
+  exitDrive(mode = "walk") {
+    if (!this.driving) return;
+    if (mode === "walk" && Math.abs(this.drive.st.speed) > 0.6) {
+      if (!this.drive.exiting) {
+        this.drive.exiting = true;
+        document.getElementById("act-label").textContent = "Stopping…";
+      }
+      return;
+    }
+    this.finishDrive(mode);
+  }
+
+  finishDrive(mode) {
+    const $ = (id) => document.getElementById(id);
+    const r = this.rover;
+    this.driving = false;
+    r.setManual(false);
+    r.task = Math.abs(r.speed) > 0.3 ? "Coasting to a stop" : "Parked · manual stop";
+    if (mode === "walk") r.speed = 0;
+    this.walkCtl.setTarget(this.walker);
+    this.walkCtl.reset();
+    this.audio.setDriving(false);
+    this.audio.driveStop();
+    $("app").classList.remove("driving");
+    $("drive-hud").hidden = true;
+    $("btn-act").hidden = true;
+    this.nearAct = null;
+    this.save();
+    if (mode === "walk") {
+      // Step out ~3.5 m to the rover's side, clear of colliders, facing a point ahead of it.
+      const p = exitSpot(r.pos.x, r.pos.z, r.heading, this.staticColliders, heightAt);
+      const ax = r.pos.x + Math.sin(r.heading) * 5;
+      const az = r.pos.z + Math.cos(r.heading) * 5;
+      this.enterWalk({ x: p.x, z: p.z, yaw: Math.atan2(ax - p.x, az - p.z), fromRover: true });
+      return;
+    }
+    $("app").classList.remove("walking", "menu-open");
+    $("walk-ui").hidden = true;
+    $("compass").hidden = true;
+    $("loc").hidden = true;
+    $("discover").hidden = true;
+    $("btn-menu").hidden = true;
+    this.rig.controls.target.copy(r.pos).y += 1.4;
+    this.flyOut(mode);
+  }
+
+  /** Right-side drag while driving orbits the chase camera; it eases back behind when released. */
+  driveLook(dx, dy) {
+    const c = this.driveCam;
+    if (!c) return;
+    const k = 0.0048 * (this.settings.lookSens ?? 1);
+    c.yawOff = wrapAngle(c.yawOff - dx * k);
+    c.pitchOff = Math.max(-0.17, Math.min(0.95, c.pitchOff + dy * k * 0.8));
+    c.lastLook = performance.now();
+  }
+
+  /** Per-frame manual driving: physics step, rover pose, exit braking, HUD. */
+  updateDrive(dt) {
+    const d = this.drive;
+    const inp = this.driveIn.input;
+    const st = d.st;
+    stepRover(st, { throttle: inp.mz, steer: inp.mx, brake: d.exiting }, dt, heightAt, this.staticColliders);
+    this.rover.applyManual(st, d.exiting ? 0 : inp.mx);
+    if (st.blocked && !d.wasBlocked && Math.abs(st.accel) > 2) this.audio.bump(Math.min(1, Math.abs(st.accel) / 20));
+    d.wasBlocked = st.blocked;
+    if (d.exiting && Math.abs(st.speed) < 0.3) {
+      this.finishDrive("walk");
+      return;
+    }
+    d.hudT -= dt;
+    if (d.hudT <= 0) {
+      d.hudT = 0.1;
+      const v = Math.abs(st.speed);
+      document.getElementById("drive-speed").textContent = v.toFixed(1);
+      document.getElementById("drive-gear").textContent = st.speed < -0.05 ? "R" : v < 0.05 ? "P" : "D";
+    }
+  }
+
+  /** Spring-damped chase camera: behind and above the rover, looking a little ahead. */
+  updateDriveCam(dt) {
+    const c = this.driveCam;
+    const r = this.rover;
+    const cam = this.world.camera;
+    c.blend = Math.min(1, c.blend + dt / 1.4);
+    const e = c.blend * c.blend * (3 - 2 * c.blend);
+    // Released drags ease back behind the rover.
+    if (performance.now() - c.lastLook > 1200) {
+      const k = Math.exp(-dt * 1.6);
+      c.yawOff *= k;
+      c.pitchOff *= k;
+    }
+    // The camera swings round after the rover's heading with a little lag.
+    c.yawSm += wrapAngle(r.heading - c.yawSm) * (1 - Math.exp(-dt * 2.4));
+    const yaw = c.yawSm + Math.PI + c.yawOff;
+    const el = Math.max(0.05, Math.min(1.2, 0.22 + c.pitchOff));
+    // Portrait phones have a narrow horizontal FOV: sit a little further back there, and further
+    // still when orbited round to the rover's long side.
+    const portrait = cam.aspect < 1 ? 1 : 0;
+    let dist = (9.2 + portrait * 1.2 + Math.min(2, Math.abs(r.speed) * 0.25)) * (1 + 0.22 * Math.abs(Math.sin(c.yawOff)));
+    const sx = Math.sin(yaw);
+    const sz = Math.cos(yaw);
+    const pivotY = r.pos.y + 1.5;
+    // Pull in rather than end up inside a building.
+    for (let i = 0; i < 6; i++) {
+      const px = r.pos.x + sx * Math.cos(el) * dist;
+      const pz = r.pos.z + sz * Math.cos(el) * dist;
+      if (!OBSTACLES.some((o) => Math.hypot(px - o.x, pz - o.z) < o.r + 0.6)) break;
+      dist *= 0.82;
+    }
+    const want = c.desired.set(r.pos.x + sx * Math.cos(el) * dist, pivotY + Math.sin(el) * dist, r.pos.z + sz * Math.cos(el) * dist);
+    want.y = Math.max(want.y, heightAt(want.x, want.z) + 1.4);
+    const rate = 1.2 + 6 * e;
+    const kp = 1 - Math.exp(-dt * rate);
+    c.pos.x += (want.x - c.pos.x) * kp;
+    c.pos.z += (want.z - c.pos.z) * kp;
+    c.pos.y += (want.y - c.pos.y) * (1 - Math.exp(-dt * (1 + 3.5 * e)));
+    const ground = heightAt(c.pos.x, c.pos.z) + 1.2;
+    if (c.pos.y < ground) c.pos.y = ground;
+    // Aim slightly ahead of the rover (further ahead the faster it goes).
+    // Aim a little past the rover along the camera's own line of sight: the rover stays centred
+    // left-right (narrow portrait FOV) and sits low in frame, leaving room to see where it is going.
+    const ahead = 3 + Math.max(0, r.speed) * 0.35;
+    const aim = c.aim.set(r.pos.x - sx * ahead, pivotY, r.pos.z - sz * ahead);
+    c.look.lerp(aim, 1 - Math.exp(-dt * (1.5 + 6 * e)));
+    cam.position.copy(c.pos);
+    cam.lookAt(c.look);
+    // Compass and location follow what the chase camera is looking at.
+    this.updateWayfinding(r.pos.x, r.pos.z, Math.atan2(c.look.x - c.pos.x, c.look.z - c.pos.z), dt);
   }
 
   /** Tap while walking: inspect structures, samples and sites under the finger. */
@@ -964,6 +1229,23 @@ class App {
     this.pulseAt(0, 16.4);
     this.audio.chime();
     this.hud.toast("Airlock", "Cycling. Hatch open briefly.", "info", 3200);
+  }
+
+  /** On-foot inspection of a structure: a pulse, a cue and one live line from its telemetry. */
+  actInspect(id, x, z, text) {
+    const info = STRUCTURE_INFO[id];
+    this.pulseAt(x, z, "#8fd8ff");
+    this.audio.select();
+    let line = text;
+    if (!line && info?.telemetry) {
+      try {
+        const rows = info.telemetry({ sim: this.sim, summary: this.summary, rover: this.rover });
+        line = rows.slice(0, 2).map(([k, v]) => `${k}: ${v}`).join(" · ");
+      } catch {
+        line = info.eyebrow;
+      }
+    }
+    this.hud.toast(info?.name ?? id, line ?? "", "info", 4200);
   }
 
   actScan() {
@@ -1080,15 +1362,30 @@ class App {
       }
     }
 
-    // Landmarks reached on foot.
+    this.updateWayfinding(st.x, st.z, st.yaw, dt);
+
+    const shown = this.found.size;
+    if (shown !== this.discoverShown) {
+      this.discoverShown = shown;
+      document.getElementById("discover-n").textContent = `${shown}/${SAMPLES.length}`;
+      const el = document.getElementById("discover");
+      el.classList.remove("pop");
+      void el.offsetWidth;
+      el.classList.add("pop");
+    }
+  }
+
+  /** Landmarks reached, location line and compass, for the walker or the driven rover. */
+  updateWayfinding(x, z, yaw, dt) {
     for (const L of LANDMARKS) {
       if (this.visitedLandmarks.has(L.id)) continue;
-      if (Math.hypot(st.x - L.x, st.z - L.z) < 45) {
+      if (Math.hypot(x - L.x, z - L.z) < 45) {
         this.visitedLandmarks.add(L.id);
         this.missions.emit({ type: "visit", id: L.id }, this.ctx());
         this.audio.chime();
       }
     }
+    const st = { x, z, yaw };
 
     this.locT -= dt;
     if (this.locT <= 0) {
@@ -1114,16 +1411,6 @@ class App {
       m.el.style.display = Math.abs(rel) > 1.6 ? "none" : "";
       m.el.style.left = `calc(50% + ${(-rel * 150).toFixed(1)}px)`;
     }
-
-    const shown = this.found.size;
-    if (shown !== this.discoverShown) {
-      this.discoverShown = shown;
-      document.getElementById("discover-n").textContent = `${shown}/${SAMPLES.length}`;
-      const el = document.getElementById("discover");
-      el.classList.remove("pop");
-      void el.offsetWidth;
-      el.classList.add("pop");
-    }
   }
 
   /** Lighting presets run the simulation forward as a smooth time-lapse to that local time. */
@@ -1145,6 +1432,8 @@ class App {
   toggleCinematic(on) {
     if (on === this.cinematic.active) return;
     if (on) {
+      if (this.driving) this.finishDrive("orbit");
+      else if (this.walker.active) this.exitWalk("orbit");
       this.sheet.close();
       this.rig.cinematic = true;
       this.rig.controls.enabled = false;
@@ -1188,7 +1477,7 @@ class App {
   }
 
   dispatchSurvey(id) {
-    if (this.roverBusy() || this.surveyed.has(id)) return;
+    if (this.roverBusy() || this.surveyed.has(id) || this.manualBlocked()) return;
     const site = SURVEY_SITES.find((s) => s.id === id);
     this.roverTask = { type: "survey", site: id, phase: "drive" };
     this.rover.busy = true;
@@ -1203,7 +1492,7 @@ class App {
   }
 
   dispatchClean() {
-    if (this.roverBusy()) return;
+    if (this.roverBusy() || this.manualBlocked()) return;
     this.roverTask = { type: "clean", phase: "drive" };
     this.rover.busy = true;
     this.rover.driveTo(SOLAR_SERVICE_POINT.x, SOLAR_SERVICE_POINT.z, "En route to solar field", () => {
@@ -1326,7 +1615,11 @@ class App {
     const t = now / 1000;
 
     this.updateSim(dt);
+    if (this.driving) this.updateDrive(dt);
     this.rover.update(dt, t);
+    this.roverCollider.x = this.rover.pos.x;
+    this.roverCollider.z = this.rover.pos.z;
+    if (this.driving) this.updateDriveCam(dt);
     this.tracks.update(this.rover.pos, this.rover.heading, this.rover.moving);
     this.updateWalk(dt, t);
     this.updateRoverTask(dt);
@@ -1336,11 +1629,12 @@ class App {
     const gd = Math.hypot(this.rover.pos.x - STRUCTURE_POS.garage.x, this.rover.pos.z - (STRUCTURE_POS.garage.z + 8));
     garage.setOpen(gd < 18);
 
-    this.rig.update(dt);
+    if (!this.driving) this.rig.update(dt);
     if (this.cinematic.active) this.cinematic.update(dt, this.world.camera);
-    const focus = this.walker.active ? this.world.camera.position : this.rig.controls.target;
+    const focus = this.driving ? this.rover.pos : this.walker.active ? this.world.camera.position : this.rig.controls.target;
     const env = this.world.updateEnvironment({ sunDir: this.sunDir, tau: this.sim.flows.tau, focus, time: t, dt, frame: this.frame });
     this.settlement.update(t, env, this.sim);
+    this.ambient?.update(t, dt, env, this.sim, this.world.camera.position);
 
     // Selection ring
     if (this.selected) {
@@ -1363,7 +1657,10 @@ class App {
     // Audio proximity
     const camDist = this.world.camera.position.length();
     const roverNear = Math.max(0, 1 - this.world.camera.position.distanceTo(this.rover.pos) / 60);
-    this.audio.update(Math.max(0, 1 - camDist / 140), env.storm, roverNear * Math.min(1, this.rover.speed / 3), this.rover.speed);
+    const roverV = Math.abs(this.rover.speed);
+    const steerFx = this.driving ? Math.abs(this.driveIn.input.mx) * Math.max(0, 1 - roverV / 2) : 0;
+    this.audio.update(Math.max(0, 1 - camDist / 140), env.storm, roverNear * Math.min(1, roverV / 3 + steerFx * 0.4), roverV, steerFx);
+    this.rover.dust.setView(0.35 + Math.max(0, this.sunDir.y) * 1.4, this.renderer.domElement.height);
 
     if (this.started) this.updateLabels();
 

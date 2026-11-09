@@ -7,6 +7,7 @@ export class AudioEngine {
     this.ctx = null;
     this.enabled = false;
     this.volume = 0.7;
+    this.driving = false;
   }
 
   ensure() {
@@ -97,7 +98,27 @@ export class AudioEngine {
     });
     this.motorPanner = mkPanner();
     this.motorFilter.connect(this.motorGain).connect(this.motorPanner);
-    this.motorGain.connect(this.motorPanner);
+    // Gear whine: a soft triangle an octave or two above the motors, rising with speed.
+    this.whineGain = ctx.createGain();
+    this.whineGain.gain.value = 0;
+    this.whineOsc = ctx.createOscillator();
+    this.whineOsc.type = "triangle";
+    this.whineOsc.frequency.value = 320;
+    this.whineOsc.connect(this.whineGain).connect(this.motorPanner);
+    this.whineOsc.start();
+    // Regolith crunch under six wheels: looped noise through a low band-pass, gain ∝ speed.
+    this.rumbleGain = ctx.createGain();
+    this.rumbleGain.gain.value = 0;
+    this.rumbleFilter = ctx.createBiquadFilter();
+    this.rumbleFilter.type = "bandpass";
+    this.rumbleFilter.frequency.value = 160;
+    this.rumbleFilter.Q.value = 0.9;
+    const rumble = ctx.createBufferSource();
+    rumble.buffer = buf;
+    rumble.loop = true;
+    rumble.playbackRate.value = 1.7;
+    rumble.connect(this.rumbleFilter).connect(this.rumbleGain).connect(this.motorPanner);
+    rumble.start();
     this.noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 0.25, ctx.sampleRate);
     const nd = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / nd.length, 3);
@@ -169,16 +190,58 @@ export class AudioEngine {
     src.start();
   }
 
-  /** Called every frame: proximity to the habitat, storm intensity, rover speed × proximity. */
-  update(habitatProximity, storm, rover = 0, roverSpeed = 0) {
+  /**
+   * Called every frame: proximity to the habitat, storm intensity, rover speed × proximity,
+   * absolute rover speed (m/s) and, while driving, the steering effort (0..1).
+   */
+  update(habitatProximity, storm, rover = 0, roverSpeed = 0, steer = 0) {
     if (!this.enabled || !this.ctx) return;
     const t = this.ctx.currentTime;
+    const v = Math.abs(roverSpeed);
     this.humGain.gain.setTargetAtTime(habitatProximity * 1.6, t, 0.5);
     this.windGain.gain.setTargetAtTime(0.35 + storm * 0.9, t, 1.2);
     // Mars' thin CO₂ atmosphere carries sound poorly: keep the motors faint and muffled.
-    this.motorGain.gain.setTargetAtTime(rover * 0.05, t, 0.3);
-    this.motorFilter.frequency.setTargetAtTime(220 + roverSpeed * 60, t, 0.3);
-    this.motorOsc.forEach((o, i) => o.frequency.setTargetAtTime(55 + roverSpeed * 9 + i * 0.9, t, 0.3));
+    // At the wheel, the cab carries the drivetrain through the structure, so it is louder.
+    const near = this.driving ? Math.max(rover, 0.85 * Math.min(1, 0.25 + v / 3)) : rover;
+    const k = this.driving ? 2.2 : 1;
+    this.motorGain.gain.setTargetAtTime(near * 0.05 * k, t, 0.25);
+    this.motorFilter.frequency.setTargetAtTime(220 + v * 60 + steer * 80, t, 0.25);
+    this.motorOsc.forEach((o, i) => o.frequency.setTargetAtTime(55 + v * 9 + steer * 6 + i * 0.9, t, 0.25));
+    this.whineOsc.frequency.setTargetAtTime(300 + v * 70 + steer * 40, t, 0.2);
+    this.whineGain.gain.setTargetAtTime(near * Math.min(1, v / 5 + steer * 0.3) * 0.012 * k, t, 0.25);
+    this.rumbleFilter.frequency.setTargetAtTime(120 + v * 22, t, 0.3);
+    this.rumbleGain.gain.setTargetAtTime(near * Math.min(1, v / 6) * 0.22 * k, t, 0.25);
+  }
+
+  /** Driving from the rover: drivetrain sounds come forward in the mix. */
+  setDriving(on) {
+    this.driving = on;
+  }
+
+  /** Power-up chirp when the player takes the wheel; reversed when they hand it back. */
+  driveStart() {
+    this.tone(330, 0.12, "triangle", 0.05);
+    this.tone(495, 0.12, "triangle", 0.05, 0.1);
+    this.tone(660, 0.22, "sine", 0.05, 0.2);
+  }
+  driveStop() {
+    this.tone(660, 0.12, "sine", 0.045);
+    this.tone(440, 0.2, "triangle", 0.045, 0.1);
+  }
+
+  /** A dull thud when the rover runs into something it cannot climb. */
+  bump(strength = 1) {
+    if (!this.enabled || !this.ctx) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.45;
+    const f = this.ctx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = 180;
+    const g = this.ctx.createGain();
+    g.gain.value = 0.12 * Math.min(1, strength);
+    src.connect(f).connect(g).connect(this.master);
+    src.start();
   }
 
   tone(freq, dur = 0.12, type = "sine", gain = 0.08, delay = 0) {

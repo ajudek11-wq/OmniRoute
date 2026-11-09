@@ -90,6 +90,121 @@ function wheelGeometries() {
   return { tread, hub: mergeGeometries(hubParts) };
 }
 
+/**
+ * Regolith dust kicked up behind the wheels: one pooled THREE.Points draw call with per-particle
+ * size and alpha (≤ 60 particles). Lives in world space so puffs stay where they were thrown.
+ */
+const DUST_VERT = /* glsl */ `
+attribute float aSize;
+attribute float aAlpha;
+uniform float uScale;
+varying float vAlpha;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = min(320.0, aSize * projectionMatrix[1][1] * uScale / max(0.1, -mv.z));
+  vAlpha = aAlpha;
+}`;
+const DUST_FRAG = /* glsl */ `
+uniform vec3 uColor;
+varying float vAlpha;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float d = length(c) * 2.0;
+  float a = smoothstep(1.0, 0.1, d);
+  a *= sqrt(a) * vAlpha;
+  if (a < 0.003) discard;
+  gl_FragColor = vec4(uColor, a);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`;
+
+export class DustPuffs {
+  constructor(max = 60) {
+    this.max = max;
+    this.pos = new Float32Array(max * 3);
+    this.size = new Float32Array(max);
+    this.alpha = new Float32Array(max);
+    this.p = Array.from({ length: max }, () => ({ life: 0, age: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, s0: 0, s1: 0, a: 0 }));
+    this.next = 0;
+    this.live = 0;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute("aSize", new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute("aAlpha", new THREE.BufferAttribute(this.alpha, 1).setUsage(THREE.DynamicDrawUsage));
+    this.geo = g;
+    this.base = new THREE.Color("#dcb896"); // lighter than the ground: fine dust scatters sunlight
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: this.base.clone() }, uScale: { value: 400 } },
+      vertexShader: DUST_VERT,
+      fragmentShader: DUST_FRAG,
+      transparent: true,
+      depthWrite: false,
+    });
+    this.points = new THREE.Points(g, this.mat);
+    this.points.frustumCulled = false;
+    this.points.renderOrder = 2;
+    this.points.visible = true; // compiled with the scene at boot; hidden on the first update
+  }
+
+  /** Daylight factor (0 night … 1 noon) and drawing-buffer height for point sizing. */
+  setView(light, bufferHeight) {
+    this.mat.uniforms.uColor.value.copy(this.base).multiplyScalar(Math.max(0.12, Math.min(1, light)));
+    this.mat.uniforms.uScale.value = bufferHeight * 0.5;
+  }
+
+  emit(x, y, z, vx, vy, vz, strength) {
+    const q = this.p[this.next];
+    this.next = (this.next + 1) % this.max;
+    q.life = 1.3 + Math.random() * 1.1;
+    q.age = 0;
+    q.x = x + (Math.random() - 0.5) * 0.4;
+    q.y = y + 0.08;
+    q.z = z + (Math.random() - 0.5) * 0.4;
+    q.vx = vx + (Math.random() - 0.5) * 0.9;
+    q.vy = vy * (0.6 + Math.random() * 0.6);
+    q.vz = vz + (Math.random() - 0.5) * 0.9;
+    q.s0 = 0.35 + Math.random() * 0.3;
+    q.s1 = 2.2 + Math.random() * 1.6 + strength * 1.2;
+    q.a = 0.5 + strength * 0.35;
+  }
+
+  update(dt) {
+    let live = 0;
+    // Prevailing wind (towards ESE) carries the dust off slowly; drag settles it.
+    const drag = Math.exp(-dt * 1.6);
+    for (let i = 0; i < this.max; i++) {
+      const q = this.p[i];
+      if (q.age >= q.life) {
+        this.alpha[i] = 0;
+        continue;
+      }
+      live++;
+      q.age += dt;
+      q.vx = q.vx * drag + 0.25 * dt;
+      q.vz = q.vz * drag + 0.08 * dt;
+      q.vy = q.vy * drag - 0.5 * dt;
+      q.x += q.vx * dt;
+      q.y += q.vy * dt;
+      q.z += q.vz * dt;
+      const k = Math.min(1, q.age / q.life);
+      this.pos[i * 3] = q.x;
+      this.pos[i * 3 + 1] = q.y;
+      this.pos[i * 3 + 2] = q.z;
+      this.size[i] = q.s0 + (q.s1 - q.s0) * Math.sqrt(k);
+      this.alpha[i] = q.a * Math.min(1, q.age * 8) * Math.pow(1 - k, 1.6);
+    }
+    this.live = live;
+    this.points.visible = live > 0;
+    if (live > 0 || this.wasLive) {
+      this.geo.attributes.position.needsUpdate = true;
+      this.geo.attributes.aSize.needsUpdate = true;
+      this.geo.attributes.aAlpha.needsUpdate = true;
+    }
+    this.wasLive = live > 0;
+  }
+}
+
 export class Rover {
   constructor(M) {
     this.M = M;
@@ -114,6 +229,15 @@ export class Rover {
     this.armDeploy = 0;
     this.armTarget = 0;
     this.busy = false;
+    // Manual driving: when true, pos/heading/speed come from applyManual() each frame.
+    this.manual = false;
+    this.manualStep = 0;
+    this.steerInput = 0;
+    this.accel = 0;
+    this.bodyPitch = 0;
+    this.bodyRoll = 0;
+    this.dust = new DustPuffs(60);
+    this.dustAcc = 0;
     this.pos.y = heightAt(this.pos.x, this.pos.z);
     this.root.position.copy(this.pos);
     this.root.rotation.order = "YXZ";
@@ -207,7 +331,7 @@ export class Rover {
         fork.position.set(-s * 0.27, 0.02, 0);
         steer.add(col, fork);
         b.add(steer);
-        this.wheels.push({ steer, spin, side: s, z });
+        this.wheels.push({ steer, spin, side: s, z, susp: 0, angle: 0 });
       }
     }
 
@@ -359,13 +483,40 @@ export class Rover {
   }
 
   get moving() {
-    return this.speed > 0.2;
+    return Math.abs(this.speed) > 0.2;
+  }
+
+  /** Hand the controls to the player (true) or back to the autonomous driver (false). */
+  setManual(on) {
+    this.manual = on;
+    this.target = null;
+    this.onArrive = null;
+    this.manualStep = 0;
+    this.steerInput = 0;
+    if (on) {
+      this.armTarget = 0;
+      this.busy = false;
+      this.task = "Manual drive";
+    }
+  }
+
+  /** Apply one frame of player driving (from walk/drive.js stepRover). update() animates the rest. */
+  applyManual(st, steerInput = 0) {
+    this.pos.x = st.x;
+    this.pos.z = st.z;
+    this.heading = st.heading;
+    this.speed = st.speed;
+    this.manualStep = st.step;
+    this.steerInput = steerInput;
   }
 
   update(dt, t) {
     let desired = 0;
-    const prevHeading = this.heading;
-    if (this.target) {
+    const prevHeading = this.manual ? this.lastHeading ?? this.heading : this.heading;
+    const prevSpeed = this.speed;
+    if (this.manual) {
+      // Pose already set by applyManual(); fall through to animation only.
+    } else if (this.target) {
       const dx = this.target.x - this.pos.x;
       const dz = this.target.z - this.pos.z;
       const dist = Math.hypot(dx, dz);
@@ -400,15 +551,25 @@ export class Rover {
         desired = Math.min(this.maxSpeed, dist * 0.8 + 1.5) * turnPenalty;
       }
     }
-    this.speed += (desired - this.speed) * Math.min(1, dt * 1.4);
-    const step = this.speed * dt;
-    this.pos.x += Math.sin(this.heading) * step;
-    this.pos.z += Math.cos(this.heading) * step;
-    this.odometer += step;
-    this.battery = Math.max(0.05, this.battery - step * 0.00004);
+    let step;
+    if (this.manual) {
+      step = this.manualStep;
+      this.manualStep = 0;
+    } else {
+      this.speed += (desired - this.speed) * Math.min(1, dt * 1.4);
+      step = this.speed * dt;
+      this.pos.x += Math.sin(this.heading) * step;
+      this.pos.z += Math.cos(this.heading) * step;
+    }
+    this.lastHeading = this.heading;
+    this.odometer += Math.abs(step);
+    this.accel += ((dt > 0 ? (this.speed - prevSpeed) / dt : 0) - this.accel) * Math.min(1, dt * 4);
+    this.battery = Math.max(0.05, this.battery - Math.abs(step) * 0.00004);
     const atHome = Math.hypot(this.pos.x - ROVER_HOME.x, this.pos.z - ROVER_HOME.z) < 8;
     if (atHome && !this.moving) this.battery = Math.min(1, this.battery + dt * 0.01);
-    this.yawRate += ((dt > 0 ? (this.heading - prevHeading) / dt : 0) - this.yawRate) * Math.min(1, dt * 5);
+    let dh = this.heading - prevHeading;
+    dh = Math.atan2(Math.sin(dh), Math.cos(dh));
+    this.yawRate += ((dt > 0 ? dh / dt : 0) - this.yawRate) * Math.min(1, dt * 5);
 
     // Terrain following from four contact points.
     const sh = Math.sin(this.heading);
@@ -424,12 +585,59 @@ export class Rover {
     this.root.position.copy(this.pos);
     this.root.rotation.set(this.pitch, this.heading, this.roll);
 
-    // Corner-wheel steering follows the turn rate (front and rear turn opposite ways).
-    const steer = Math.max(-0.45, Math.min(0.45, this.yawRate * (this.moving ? 0.9 : 3)));
+    // Body squats under acceleration and leans out of turns (only a degree or two).
+    const lean = this.speed * this.yawRate;
+    this.bodyPitch += (Math.max(-0.035, Math.min(0.035, -this.accel * 0.012)) - this.bodyPitch) * Math.min(1, dt * 5);
+    this.bodyRoll += (Math.max(-0.03, Math.min(0.03, lean * 0.012)) - this.bodyRoll) * Math.min(1, dt * 5);
+    const bob = Math.sin(t * 9) * 0.01 * Math.min(1, Math.abs(this.speed));
+    this.body.position.y = bob;
+    this.body.rotation.set(this.bodyPitch, 0, this.bodyRoll);
+
+    // Corner-wheel steering: follows the stick (manual) or the turn rate (autonomous). Front and
+    // rear turn opposite ways; at a standstill the corners toe in for a point turn.
+    const steerAuto = Math.max(-0.45, Math.min(0.45, this.yawRate * (this.moving ? 0.9 : 3)));
+    const steer = this.manual ? -this.steerInput * 0.42 : steerAuto;
+    const pivot = this.manual ? Math.abs(this.steerInput) * Math.max(0, 1 - Math.abs(this.speed) / 1.2) : 0;
+    const sinP = Math.sin(this.pitch);
+    const sinR = Math.sin(this.roll);
+    const ks = Math.min(1, dt * 14);
     for (const w of this.wheels) {
-      w.spin.rotation.x += step / WHEEL_R;
-      w.steer.rotation.y = w.z > 0.1 ? steer : w.z < -0.1 ? -steer : 0;
+      // Skid steering: the two sides spin at different rates in a turn (opposite in a point turn).
+      w.spin.rotation.x += (step + this.yawRate * dt * w.side * TRACK) / WHEEL_R;
+      const normal = w.z > 0.1 ? steer : w.z < -0.1 ? -steer : 0;
+      const pivotAngle = w.z > 0.1 ? -w.side * 0.8 : w.z < -0.1 ? w.side * 0.8 : 0;
+      const ang = normal * (1 - pivot) + pivotAngle * pivot;
+      w.angle += (ang - w.angle) * Math.min(1, dt * 8);
+      w.steer.rotation.y = w.angle;
+      // Rocker-bogie: each wheel rides the ground under it, relative to the body's mean plane.
+      const lx = w.side * TRACK;
+      const wx = this.pos.x + ch * lx + sh * w.z;
+      const wz = this.pos.z - sh * lx + ch * w.z;
+      const plane = this.pos.y - w.z * sinP + lx * sinR;
+      const rough = this.moving ? (Math.sin(wx * 1.7 + wz * 0.9) * Math.sin(wz * 2.3 - wx * 0.6)) * 0.1 : 0;
+      const off = Math.max(-0.24, Math.min(0.24, heightAt(wx, wz) - plane + rough));
+      w.susp += (off - w.susp) * ks;
+      // Undo the body's squat/lean/bob for the wheels so they stay planted.
+      w.steer.position.y = WHEEL_R + w.susp + w.z * Math.sin(this.bodyPitch) - lx * Math.sin(this.bodyRoll) - bob;
     }
+
+    // Dust puffs behind the trailing wheels, more with speed.
+    const sp = Math.abs(this.speed);
+    if (sp > 0.8) {
+      this.dustAcc += dt * Math.min(30, sp * 4.5);
+      const dir = this.speed > 0 ? 1 : -1;
+      while (this.dustAcc > 1) {
+        this.dustAcc -= 1;
+        const w = this.wheels[(Math.random() * 6) | 0];
+        const lx = w.side * TRACK;
+        const lz = -dir * BASE * 1.05;
+        const wx = this.pos.x + ch * lx + sh * lz;
+        const wz = this.pos.z - sh * lx + ch * lz;
+        const back = -dir * sp * 0.22;
+        this.dust.emit(wx, heightAt(wx, wz), wz, sh * back + ch * lx * 0.25, 0.5 + sp * 0.12, ch * back - sh * lx * 0.25, Math.min(1, sp / 7));
+      }
+    } else this.dustAcc = 0;
+    this.dust.update(dt);
     // Mast scans when idle, looks ahead while driving.
     const pan = this.moving ? 0 : Math.sin(t * 0.3) * 0.9;
     this.mastHead.rotation.y += (pan - this.mastHead.rotation.y) * Math.min(1, dt * 2);
@@ -452,7 +660,6 @@ export class Rover {
     this.leds[1].visible = Math.sin(t * 4) > 0.2;
     this.leds[2].visible = this.busy ? Math.sin(t * 7) > 0 : false;
     this.leds[0].material.color.set(this.battery < 0.25 ? "#ff5a3c" : "#5ce08a");
-    this.body.position.y = Math.sin(t * 9) * 0.01 * Math.min(1, this.speed);
   }
 
   telemetry() {

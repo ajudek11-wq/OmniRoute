@@ -163,6 +163,72 @@ export const STRUCTURE_INFO = {
       ["Share of generation", sim.flows.genKW > 0 ? pct(sim.flows.fissionKW / sim.flows.genKW) : "—"],
     ],
   },
+  habitatB: {
+    name: "Habitat B",
+    eyebrow: "Command & medical · 2 decks",
+    blurb:
+      "A vertical two-deck module joined to the main habitat by a flexible bellows tunnel. The lower deck is a medical bay and suit workshop; the upper deck is the command station, with windows over the base.",
+    facts: [
+      "Two pressurised modules joined by a tunnel give the crew a safe haven: if one module loses pressure, hatches seal and everyone moves to the other.",
+      "Suitports let a crew member climb into a suit through its back hatch while the suit stays outside, so dust never enters the cabin. NASA has tested suitports on its pressurised-rover prototypes.",
+    ],
+    telemetry: ({ sim, summary }) => [
+      ["Pressure", "Shared with main habitat"],
+      ["Tunnel hatches", "Open"],
+      ["Command deck", sim.powerDeficit ? "On battery bus" : "Online", summary.power.status],
+      ["Medical bay", "Ready"],
+      ["Crew (shared)", `${sim.config.crew}`],
+    ],
+  },
+  yard: {
+    name: "Maintenance Yard",
+    eyebrow: "Storage · Repair · Logistics",
+    blurb:
+      "An open-sided repair shelter, a gantry crane and stacked cargo containers. Spare wheels, tanks and tools are kept here so broken hardware can be fixed on Mars instead of waiting years for a spare from Earth.",
+    facts: [
+      "A resupply from Earth can only launch about every 26 months, when the planets line up. Spare parts, and the ability to fit them, are a survival system.",
+      "Curiosity's aluminium wheels have been punctured and cracked by sharp rocks since 2013. Wheel wear is a real maintenance job on Mars.",
+    ],
+    telemetry: ({ rover }) => [
+      ["Shelter", "Open · lit at night"],
+      ["Gantry crane", "Shuttling cargo"],
+      ["Spare rover wheels", "4 in stock"],
+      ["Rover", rover.task],
+      ["Rover battery", pct(rover.battery)],
+    ],
+  },
+  isru: {
+    name: "Propellant Plant",
+    eyebrow: "ISRU · Sabatier & cryogenics",
+    blurb:
+      "Water from the ice plant is split into hydrogen and oxygen. The hydrogen reacts with carbon dioxide from the air to make methane. Both propellants are chilled to liquids and stored in insulated tanks for the ascent vehicle.",
+    facts: [
+      "The Sabatier reaction (CO₂ + 4 H₂ → CH₄ + 2 H₂O) has run on the ISS since 2010, recovering water from the CO₂ the crew breathes out.",
+      "Mars' atmosphere is about 95% carbon dioxide: the raw material for both methane fuel and oxygen.",
+    ],
+    telemetry: ({ sim }) => [
+      ["Water feed", sim.shed.waterExtraction ? "Paused (power shed)" : sim.systems.waterExtraction ? "Flowing" : "Paused"],
+      ["CO₂ intake", "Atmosphere · ~95% CO₂"],
+      ["Cryo tanks", "Holding · boil-off managed"],
+      ["Mode", "Pilot plant (design)"],
+    ],
+  },
+  fieldlab: {
+    name: "Geoscience Field Station",
+    eyebrow: "Seismology · Weather · Drilling",
+    blurb:
+      "A small hard-shell lab beside an instrument field: a shielded seismometer, a weather mast and a core drill. Cores go from the drill to the racks, then to the main laboratory.",
+    facts: [
+      "NASA's InSight lander recorded more than 1,300 marsquakes between 2018 and 2022 with a seismometer under a domed wind and thermal shield, like the one here.",
+      "Ice and layered sediments below the surface keep a record of Mars' past climate. Drilling down through them is like reading back through a diary.",
+    ],
+    telemetry: ({ sim }) => [
+      ["Seismometer", "Recording"],
+      ["Dust opacity τ", sim.flows.tau.toFixed(2)],
+      ["Sunlight transmission", pct(sim.flows.transmission)],
+      ["Core drill", "Idle"],
+    ],
+  },
 };
 
 export const SYSTEM_LABELS = {

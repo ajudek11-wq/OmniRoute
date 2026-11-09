@@ -3,6 +3,8 @@
  *  - Left half: floating joystick (appears where the thumb lands) moves the player.
  *  - Right half: drag to look; a short tap inspects what is under the finger.
  *  - Keyboard: WASD / arrows move, Shift sprints, arrows also turn, E interacts.
+ * The same controls drive the rover: setTarget() swaps the walker for any object with an
+ * `input` {mx, mz, sprint, lookX, lookY} and a `look(dx, dy)` method (mz = throttle, mx = steer).
  */
 const JOY_MAX = 58; // px from centre to full deflection
 const TAP_MOVE = 10; // px
@@ -36,6 +38,15 @@ export class WalkControls {
     window.addEventListener("keydown", (e) => this.key(e, true));
     window.addEventListener("keyup", (e) => this.key(e, false));
     window.addEventListener("blur", () => this.reset());
+  }
+
+  /** Route stick, keys and look drags to another target (e.g. the rover while driving). */
+  setTarget(target) {
+    if (target === this.walker) return;
+    this.zero();
+    this.walker = target;
+    this.zero();
+    this.applyKeys();
   }
 
   reset() {
